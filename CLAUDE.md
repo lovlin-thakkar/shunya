@@ -2,66 +2,73 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Repository Layout
+
+This repo contains two implementations of Shunya:
+
+- **`django_api/` + `pipecat_agent/`** — the original working submission (django-tenants, schema-per-tenant)
+- **`zenerate/web-py/`** — rebased onto the zenerate baseline (zenlib-mt-py, RLS single-schema). This is the preferred implementation going forward.
+
+For everyday development, use the zenerate/web-py layout. The original django_api/ is kept as reference.
+
 ## What This Is
 
 Shunya is a voice AI QA platform. It has three runtime services:
 
-1. **Django API** (`django_api/`) — control plane: multi-tenant REST API, Celery workers, LLM judge, scenario runner; also serves call recordings at `/recordings/<run-id>.wav`
-2. **Pipecat agent server** (`pipecat_agent/server.py`, :8001) — voice runtime: FastAPI + Daily.co WebRTC + ElevenLabs Scribe v2 STT + Claude Haiku + ElevenLabs TTS (the agent under test)
-3. **Caller bot service** (`pipecat_agent/caller_server.py`, :8002) — the synthetic caller (`ScenarioCallerBot`) for audio mode; a **separate process** because `daily-python` allows only one `CallClient`/`Daily.init()` per process
+1. **Django API** (`zenerate/web-py/apps/api/`) — control plane: multi-tenant REST API (RLS), Celery workers, LLM judge, scenario runner; serves call recordings at `/recordings/<run-id>.wav`
+2. **Pipecat agent server** (`zenerate/web-py/services/voice/server.py`, :8001) — voice runtime: FastAPI + Daily.co WebRTC + ElevenLabs Scribe v2 STT + Claude Haiku + ElevenLabs TTS (the agent under test)
+3. **Caller bot service** (`zenerate/web-py/services/voice/caller_server.py`, :8002) — the synthetic caller (`ScenarioCallerBot`) for audio mode; a **separate process** because `daily-python` allows only one `CallClient`/`Daily.init()` per process
 
 Plus a CLI (`cli/`) that wraps the Django REST API.
 
-**Run with Docker.** `docker-compose up` runs the whole stack. The voice services (`pipecat`, `caller`) are pinned to `python:3.12` on `linux/amd64` — `daily-python` has no Python 3.14 wheels and misbehaves on ARM64. For the deeper audio-mode engineering notes, see `TECH_SPEC.md` → "Audio Mode — Engineering Notes".
+**Run with Docker.** `docker-compose up` from `zenerate/web-py/` runs the whole stack. The voice services (`pipecat`, `caller`) are pinned to `python:3.12` on `linux/amd64` — `daily-python` has no Python 3.14 wheels and misbehaves on ARM64. For the deeper audio-mode engineering notes, see `TECH_SPEC.md` → "Audio Mode — Engineering Notes".
 
 ## Commands
 
-### Django API
+### Django API (zenerate/web-py)
 
 ```bash
-cd django_api
+cd zenerate/web-py/apps/api
+
+# Install dependencies (uv workspace)
+uv sync --all-packages
 
 # Run migrations (always after model changes)
-python manage.py migrate
+uv run python manage.py migrate
 
 # Load scenario YAML files into DB
-python manage.py load_scenarios
+uv run python manage.py load_scenarios --dir ../../../../scenarios
+
+# Load agents from YAML
+uv run python manage.py load_agents --dir ../../../../agents
 
 # Dev server (port 8000)
-python manage.py runserver
+uv run python manage.py runserver
 
 # Celery worker (required for test runs and LLM judge)
-celery -A config worker --loglevel=info
+uv run celery -A zenapi.celery worker --loglevel=info
 
 # Celery beat (monitoring/alert tasks)
-celery -A config beat --loglevel=info
+uv run celery -A zenapi.celery beat --loglevel=info
 ```
 
 ### Tests
 
-All tests run from `django_api/` using pytest (configured in `pytest.ini`):
+Tests run from `zenerate/web-py/apps/api/` using pytest:
 
 ```bash
-cd django_api
-
-# All tests
-pytest
-
-# Single test file
-pytest tests/test_api_smoke.py
-
-# Single test
-pytest tests/test_judge.py::TestJudge::test_evaluate_result
+cd zenerate/web-py/apps/api
+uv run pytest
 ```
 
-Tests use `DJANGO_SETTINGS_MODULE=config.settings.local`. API key auth is bypassed in tests via `@patch("rest_framework_api_key.permissions.HasAPIKey.has_permission", return_value=True)`.
+The conftest uses `tenant_a`/`tenant_b`/`in_tenant` fixtures (RLS-aware). Auth uses `api_key_headers(tenant)` for CLI-style tests or `service_headers(tenant)` for internal pipecat calls.
 
 ### Pipecat servers (agent + caller)
 
-Prefer Docker (`docker-compose up pipecat caller`). For local/manual runs:
+Prefer Docker (`docker-compose up pipecat caller` from `zenerate/web-py/`). For local/manual runs:
 
 ```bash
-cd pipecat_agent
+cd zenerate/web-py/services/voice
 pip install -r requirements.txt        # needs Python 3.12 (NOT 3.14 — daily-python)
 uvicorn server:app --port 8001 --reload         # agent pipeline
 uvicorn caller_server:app --port 8002 --reload  # synthetic caller (separate process)
@@ -72,7 +79,7 @@ uvicorn caller_server:app --port 8002 --reload  # synthetic caller (separate pro
 ```bash
 pip install -e .                       # installs `shunya` command
 export SHUNYA_API_KEY=...             # required for all commands
-export SHUNYA_TENANT_HOST=demo.localhost  # required — routes requests to correct tenant schema
+export SHUNYA_BASE_URL=http://localhost:8000  # default
 
 shunya agents list
 shunya agents create "My Agent" --prompt "You are a helpful assistant."
@@ -85,47 +92,62 @@ shunya scenarios list
 shunya calls transcript <call-id>
 ```
 
-### Full Stack (Docker)
+### Full Stack (Docker — zenerate/web-py)
 
 ```bash
-docker-compose up    # postgres, redis, django, celery_worker, celery_beat, pipecat (:8001), caller (:8002)
+cd zenerate/web-py
+docker compose up    # postgres, redis, django, celery_worker, celery_beat, pipecat (:8001), caller (:8002)
 ```
 
-**Gotcha:** `celery_worker` does NOT auto-reload on code changes. After editing `apps/testing/runner.py`, `judge.py`, or any Celery task, run `docker-compose restart celery_worker`. (Django, pipecat, and caller all run with `--reload`.)
+**Gotcha:** `celery_worker` does NOT auto-reload on code changes. After editing voice_qa services or tasks, run `docker compose restart celery_worker`. (Django, pipecat, and caller all run with `--reload`.)
 
 ## Environment Variables
 
-`django_api/.env`:
+`zenerate/web-py/apps/api/.env` (copy from `.env.example`):
 
 ```
-ANTHROPIC_API_KEY=         # required — AgentChat (Haiku) + LLM judge (Sonnet)
-DB_NAME=shunya
-DB_USER=postgres
-DB_PASSWORD=postgres
-DB_HOST=localhost          # docker-compose overrides to "postgres"
+DJANGO_SECRET_KEY=         # required in prod
+DB_NAME=zenapi
+DB_USER=zen
+DB_PASSWORD=zen
+DB_HOST=localhost          # docker-compose overrides to "db"
 DB_PORT=5432
-REDIS_URL=redis://localhost:6379/0   # docker-compose overrides to redis://redis:6379/0
-PIPECAT_SERVER_URL=http://localhost:8001   # docker-compose overrides to http://pipecat:8001
-ELEVENLABS_API_KEY=        # audio mode (Scribe v2 STT)
+REDIS_URL=redis://localhost:6379/0
+SERVICE_TOKEN=             # shared secret for pipecat→django internal calls; must match DJANGO_SERVICE_TOKEN
+ANTHROPIC_API_KEY=         # required — AgentChat (Haiku) + LLM judge (Sonnet)
+ELEVENLABS_API_KEY=        # audio mode (Scribe v2 STT + TTS)
 DAILY_API_KEY=             # audio mode (Daily account needs a payment method for SDK joins)
-# DEEPGRAM_API_KEY is vestigial — STT is ElevenLabs Scribe v2 now; Deepgram is unused.
+PIPECAT_SERVER_URL=http://localhost:8001   # docker-compose overrides to http://pipecat:8001
+RECORDINGS_DIR=/recordings
 ```
 
-`pipecat_agent/.env` (used by both pipecat and caller containers):
+`zenerate/web-py/services/voice/.env` (copy from `.env.example`):
 
 ```
 ANTHROPIC_API_KEY=
-ELEVENLABS_API_KEY=        # TTS + Scribe v2 STT
+ELEVENLABS_API_KEY=
 DAILY_API_KEY=
 DJANGO_API_URL=http://django:8000
 CALLER_SERVICE_URL=http://caller:8002
+DJANGO_SERVICE_TOKEN=      # must match SERVICE_TOKEN in apps/api/.env
+DJANGO_TENANT_ID=1         # integer PK of the active tenant
 ```
 
 ## Architecture
 
 ### Multi-tenancy
 
-Uses `django-tenants` with schema-per-tenant on Postgres. `apps.tenants` lives in the public schema; `apps.agents`, `apps.testing`, and `apps.monitoring` live in each tenant's schema. `TenantMainMiddleware` routes requests by domain. Auth uses `TenantAPIKey` (SHA-256 hashed, stored in public schema), not DRF's built-in API key model — the `HasAPIKey` permission is the DRF API Key one but authentication is done in the view layer.
+Uses `zenlib-mt-py` (RLS single-schema) — all tenant data lives in the same Postgres schema, isolated by Postgres Row-Level Security policies keyed on `tenant_id`. Every model inherits `ActivityTenantBaseModel` which adds a `tenant` FK, auto-populated from the `context.current_tenant` ContextVar.
+
+Middleware stack (order is critical):
+1. `MultitenantContextMiddleware` — resolves tenant from Knox token or `X-Tenant-Id` header, sets `context.current_tenant` ContextVar
+2. `TenantAPIKeyMiddleware` (Shunya-specific) — validates `Authorization: Api-Key <key>`, sets `context.current_tenant` for CLI callers
+3. `MultitenantRLSMiddleware` — reads the ContextVar, runs `SET LOCAL app.current_tenant_id = <id>` on the DB connection
+
+Auth:
+- CLI → `Authorization: Api-Key <raw_key>` → `TenantAPIKeyAuthentication`
+- Pipecat → `X-Service-Token` + `X-Tenant-Id` → `ServiceTokenAuthentication`
+- UI (future) → Knox token `Authorization: Token <knox> <tenant_id>`
 
 ### Request Flow
 
@@ -183,11 +205,12 @@ YAML files live in `scenarios/`. Run `python manage.py load_scenarios` to sync t
 
 ### Celery
 
-Broker and result backend are both Redis. Two task types:
-- `run_scenario_task(test_run_id, schema_name)` (max 3 retries, 5s countdown) — one per `TestRun`
-- `run_judge_task(test_result_id, rubric, schema_name)` (max 2 retries, 10s countdown) — dispatched from inside `run_scenario` after `TestResult` is created
+Broker and result backend are both Redis. Celery app is `zenapi.celery`. Task types:
+- `run_scenario_task(test_run_id, tenant_id)` (max 3 retries) — one per `TestRun`
+- `run_judge_task(test_result_id, rubric, tenant_id)` (max 2 retries) — dispatched after `TestResult` is created
+- `compute_call_metrics(call_id, tenant_id)` — dispatched from internal `/calls/{id}/end/`
 
-**Important:** Both tasks require `schema_name` (the tenant's Postgres schema, e.g. `"demo"`) so the worker sets `schema_context` correctly before any DB access. Always dispatch with `schema_name=connection.schema_name` from within a request or a schema context — omitting it causes `ProgrammingError: relation does not exist` because the worker defaults to the `public` schema which has no tenant tables.
+**Important:** All tasks take `tenant_id` (integer PK) and call `context.current_tenant.set(tenant)` before any ORM access. This sets the RLS context for the worker. Always dispatch with `tenant.id` from within a tenant-scoped request.
 
 For parallel text-mode runs, dispatch multiple `run_scenario_task` calls in a Celery `group()`.
 
