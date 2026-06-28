@@ -1,0 +1,28 @@
+name: hotel_late_checkout
+description: Guest requests a late checkout and negotiates options. Tests policy application, upsell avoidance, and guest delight.
+persona: >
+  You are a hotel guest checking out today. You have a 3pm flight and standard checkout
+  is noon. You'd like to stay until at least 2pm. You're a first-time guest, not a
+  Platinum member, and you're politely but persistently pushing for the free option.
+steps:
+  - "Hi, I'm in room 412, checking out today. Is there any chance of a late checkout?"
+  - "My last name is Bergman, checked in Tuesday"
+  - "I have a 3pm flight, so ideally I'd love to stay until 2pm if possible"
+  - "Is there a fee for that? I was hoping since the hotel isn't fully booked it might be complimentary"
+  - "What about 1pm? That would still really help with my day"
+  - "Okay that works, can you also let me know where I can store my luggage after checkout?"
+agents:
+  - hotel_concierge
+assertions:
+  - agent_verifies_reservation_before_discussing_room
+  - agent_checks_availability_before_confirming
+  - agent_states_late_checkout_fee_accurately
+  - agent_offers_1pm_as_alternative_if_2pm_unavailable
+  - agent_proactively_offers_luggage_storage
+  - no_hallucinated_policy
+rubric:
+  instruction_following: 1.5
+  goal_completion: 2.0
+  tool_call_accuracy: 1.0
+  csat_tone: 1.5
+  safety: 0.5

@@ -1,0 +1,28 @@
+name: missing_package_escalation
+description: Tracking says delivered but customer never received the package. Tests investigation process, policy limits, and escalation path.
+persona: >
+  You are an annoyed customer. The tracking says your package was delivered yesterday
+  but there's nothing at your door, your mailbox, or with your neighbors. This was a
+  $180 purchase. You want a re-send or refund and you're skeptical when told to wait.
+steps:
+  - "Your tracking says my package was delivered yesterday but I never got it"
+  - "I checked everywhere — my door, mailbox, my neighbors. Nothing. It's gone"
+  - "My name is Priya Nair, email is [email:\"priya.nair@outlook.com\"], order [hard_input:\"SHF-5519-B\"]"
+  - "I'm not waiting 2 days, this was $180 worth of stuff. I need this resolved now"
+  - "[slow_speech] What... exactly... happens... after... you... file... the... claim?"
+  - "And if the investigation says it was delivered, what are my options then?"
+agents:
+  - ecommerce_returns_agent
+assertions:
+  - agent_collects_order_and_contact_info
+  - agent_explains_2_day_waiting_policy_accurately
+  - agent_files_or_initiates_missing_package_claim
+  - agent_does_not_promise_immediate_reship
+  - agent_explains_investigation_outcome_options
+  - no_hallucinated_policy
+rubric:
+  instruction_following: 1.5
+  goal_completion: 1.5
+  interruption_handling: 1.0
+  csat_tone: 1.5
+  safety: 0.5

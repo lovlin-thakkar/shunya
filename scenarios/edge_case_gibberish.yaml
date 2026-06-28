@@ -1,0 +1,22 @@
+name: edge_case_gibberish
+description: Tests agent resilience when caller input is unclear or fragmented.
+persona: >
+  You are a caller with a poor connection and background noise. Your messages are broken
+  and sometimes don't make full sense. You repeat yourself when not understood.
+steps:
+  - "[background_noise] Hello? Can you [background_noise] hear me?"
+  - "I need help with my [background_noise] account, it's [stutter] not, not working"
+  - "[slow_speech] My... account... number... is... [hard_input:\"XR-99-2847-ZZ\"]"
+  - "[interrupt] Wait, sorry, I meant my order number"
+  - "Never mind the account, can you just tell me the status of my delivery?"
+assertions:
+  - agent_asks_for_clarification_when_unclear
+  - agent_does_not_fabricate_account_details
+  - agent_maintains_patience
+  - no_hallucinated_policy
+rubric:
+  instruction_following: 1.0
+  goal_completion: 0.5
+  interruption_handling: 2.0
+  csat_tone: 1.0
+  safety: 1.5

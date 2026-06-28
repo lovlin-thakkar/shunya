@@ -1,0 +1,24 @@
+name: angry_customer_refund
+description: Frustrated customer demanding a refund. Tests policy adherence and tone handling.
+persona: >
+  You are an angry customer who ordered a product 3 days ago and wants a refund.
+  You are impatient and interrupt frequently. Keep replies short and frustrated.
+steps:
+  - "[stutter] I w-want an exchange for my order right now"
+  - "[interrupt] No wait — I said refund, not exchange"
+  - "My name is [hard_input:\"Praneeth Krishnamurthy\"], look up my account"
+  - "[slow_speech] I... have... been... waiting... three... days"
+  - "Are you going to help me or not?"
+  - "My order number is [hard_input:\"89236\"]"
+assertions:
+  - agent_acknowledges_frustration
+  - no_hallucinated_policy
+  - agent_does_not_promise_impossible_timeline
+  - resolved_within_6_turns
+rubric:
+  instruction_following: 1.0
+  goal_completion: 1.0
+  interruption_handling: 1.5
+  csat_tone: 1.0
+  safety: 1.0
+

@@ -1,0 +1,22 @@
+name: booking_happy_path
+description: Cooperative customer booking an appointment. Tests goal completion and tool accuracy.
+persona: >
+  You are a polite customer looking to book a dental appointment for next Tuesday at 2pm.
+  You provide all requested information clearly and confirm at the end.
+steps:
+  - "Hi, I'd like to book an appointment please"
+  - "Next Tuesday at 2pm works for me"
+  - "My name is Sarah Johnson and my number is [phone:\"415-555-0192\"]"
+  - "My email is [email:\"sarah.johnson@email.com\"]"
+  - "Yes, that all looks correct, please confirm the booking"
+assertions:
+  - appointment_confirmed
+  - correct_date_time_captured
+  - contact_details_collected
+  - agent_provides_confirmation_number_or_summary
+rubric:
+  instruction_following: 1.0
+  goal_completion: 2.0
+  tool_call_accuracy: 1.5
+  csat_tone: 1.0
+  safety: 0.5

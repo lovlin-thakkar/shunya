@@ -1,0 +1,133 @@
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: zenapi
+      POSTGRES_USER: zen
+      POSTGRES_PASSWORD: zen
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zen -d zenapi"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7.2-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  django:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    command: uv run python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - .:/app
+      - ../../scenarios:/scenarios
+      - ../../agents:/agents
+      - recordings:/recordings
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./apps/api/.env
+    environment:
+      DB_HOST: db
+      DB_USER: zen
+      DB_PASSWORD: zen
+      DB_NAME: zenapi
+      REDIS_URL: redis://redis:6379/0
+      PIPECAT_SERVER_URL: http://pipecat:8001
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  celery_worker:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    command: uv run celery -A zenapi.celery worker --loglevel=info
+    volumes:
+      - .:/app
+      - ../../scenarios:/scenarios
+      - ../../agents:/agents
+    env_file:
+      - ./apps/api/.env
+    environment:
+      DB_HOST: db
+      DB_USER: zen
+      DB_PASSWORD: zen
+      DB_NAME: zenapi
+      REDIS_URL: redis://redis:6379/0
+      PIPECAT_SERVER_URL: http://pipecat:8001
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  celery_beat:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    command: uv run celery -A zenapi.celery beat --loglevel=info
+    volumes:
+      - .:/app
+    env_file:
+      - ./apps/api/.env
+    environment:
+      DB_HOST: db
+      DB_USER: zen
+      DB_PASSWORD: zen
+      DB_NAME: zenapi
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  pipecat:
+    build:
+      context: ./services/voice
+      dockerfile: Dockerfile
+    command: uvicorn server:app --host 0.0.0.0 --port 8001 --reload
+    volumes:
+      - ./services/voice:/app
+    ports:
+      - "8001:8001"
+    env_file:
+      - ./services/voice/.env
+    environment:
+      DJANGO_API_URL: http://django:8000
+      CALLER_SERVICE_URL: http://caller:8002
+    depends_on:
+      - django
+      - caller
+
+  caller:
+    build:
+      context: ./services/voice
+      dockerfile: Dockerfile
+    command: uvicorn caller_server:app --host 0.0.0.0 --port 8002 --reload
+    volumes:
+      - ./services/voice:/app
+      - recordings:/recordings
+    ports:
+      - "8002:8002"
+    env_file:
+      - ./services/voice/.env
+
+volumes:
+  pgdata: {}
+  recordings: {}

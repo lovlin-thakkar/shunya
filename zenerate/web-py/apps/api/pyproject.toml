@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zenapi-web-py"
+version = "0.1.0"
+description = "Django app for the take-home baseline."
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "django>=5.2,<5.3",
+    "djangorestframework>=3.15",
+    "django-rest-knox>=5.0",
+    "django-cors-headers>=4.4",
+    "django-polymorphic>=3.1",
+    "psycopg[binary]>=3.2",
+    "factory-boy>=3.3",
+    "zenlib-agent-py",
+    "zenlib-mt-py",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zenapi"]

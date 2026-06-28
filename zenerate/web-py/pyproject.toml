@@ -1,0 +1,38 @@
+[project]
+name = "zenws-web-py"
+version = "0.1.0"
+description = "Take-home baseline: Django 5.2 + DRF + Postgres + RLS."
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "ipdb>=0.13",
+    "pytest>=8.0",
+    "pytest-django>=4.9",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "bandit>=1.7",
+]
+
+[tool.uv.workspace]
+members = [
+    "apps/api",
+    "packages/agent",
+    "packages/mt",
+]
+
+[tool.uv.sources]
+zenapi-web-py = { workspace = true }
+zenlib-agent-py = { workspace = true }
+zenlib-mt-py = { workspace = true }
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "zenapi.config.settings"
+pythonpath = ["apps/api/src"]
+python_files = ["test_*.py"]
+addopts = "-q --tb=short"
+
+[tool.bandit]
+exclude_dirs = ["**/tests"]

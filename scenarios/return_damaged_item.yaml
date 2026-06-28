@@ -1,0 +1,28 @@
+name: return_damaged_item
+description: Customer received a damaged product and wants a replacement or refund. Tests empathy, policy application, and resolution clarity.
+persona: >
+  You are a frustrated customer who received a blender with a cracked lid. The box looked
+  fine on the outside. You want a replacement, not a refund, but you'll accept a refund
+  if a replacement will take too long. You ordered 10 days ago.
+steps:
+  - "I got my blender delivery and the lid is completely cracked, it's unusable"
+  - "The box looked fine, it must have been damaged before it was packaged"
+  - "My order number is [hard_input:\"SHF-2847-X\"] and my name is Daniel Okafor"
+  - "I don't want a refund, I want a replacement. How long will that take?"
+  - "[interrupt] Actually wait — will I have to ship this broken one back first?"
+  - "Okay so if I keep the broken one, you'll send a new one? And it's free shipping?"
+agents:
+  - ecommerce_returns_agent
+assertions:
+  - agent_acknowledges_damage_with_empathy
+  - agent_offers_replacement_and_or_refund
+  - agent_collects_order_number_and_name
+  - agent_clarifies_return_shipping_policy
+  - agent_confirms_resolution_and_timeline
+  - no_hallucinated_policy
+rubric:
+  instruction_following: 1.0
+  goal_completion: 2.0
+  tool_call_accuracy: 1.0
+  csat_tone: 1.5
+  safety: 0.5

@@ -1,0 +1,129 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: shunya
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  django:
+    build:
+      context: ./django_api
+      dockerfile: Dockerfile
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - ./django_api:/app
+      - ./scenarios:/scenarios
+      - ./agents:/agents
+      - ./recordings:/recordings
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./django_api/.env
+    environment:
+      DB_HOST: postgres
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      REDIS_URL: redis://redis:6379/0
+      PIPECAT_SERVER_URL: http://pipecat:8001
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  celery_worker:
+    build:
+      context: ./django_api
+      dockerfile: Dockerfile
+    command: celery -A config worker --loglevel=info
+    volumes:
+      - ./django_api:/app
+      - ./scenarios:/scenarios
+      - ./agents:/agents
+    env_file:
+      - ./django_api/.env
+    environment:
+      DB_HOST: postgres
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      REDIS_URL: redis://redis:6379/0
+      PIPECAT_SERVER_URL: http://pipecat:8001
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  celery_beat:
+    build:
+      context: ./django_api
+      dockerfile: Dockerfile
+    command: celery -A config beat --loglevel=info
+    volumes:
+      - ./django_api:/app
+    env_file:
+      - ./django_api/.env
+    environment:
+      DB_HOST: postgres
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  pipecat:
+    build:
+      context: ./pipecat_agent
+      dockerfile: Dockerfile
+    command: uvicorn server:app --host 0.0.0.0 --port 8001 --reload
+    volumes:
+      - ./pipecat_agent:/app
+    ports:
+      - "8001:8001"
+    env_file:
+      - ./pipecat_agent/.env
+    environment:
+      DJANGO_API_URL: http://django:8000
+      CALLER_SERVICE_URL: http://caller:8002
+    depends_on:
+      - django
+      - caller
+
+  caller:
+    build:
+      context: ./pipecat_agent
+      dockerfile: Dockerfile
+    command: uvicorn caller_server:app --host 0.0.0.0 --port 8002 --reload
+    volumes:
+      - ./pipecat_agent:/app
+      - ./recordings:/recordings
+    ports:
+      - "8002:8002"
+    env_file:
+      - ./pipecat_agent/.env
+
+volumes:
+  postgres_data:

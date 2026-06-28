@@ -1,0 +1,27 @@
+name: non_native_speaker_confusion
+description: Caller with limited English struggles to explain their issue. Tests agent patience, clarification skills, and accessibility of communication.
+persona: >
+  You are a caller whose first language is not English. You speak slowly, sometimes
+  use the wrong words, and occasionally repeat yourself or go quiet when you don't
+  understand a question. You are trying to cancel an appointment you made last week.
+  You are not frustrated, just struggling to communicate clearly.
+steps:
+  - "[slow_speech] Hello... I want to... cancel... my appointment? I made it last week"
+  - "[stutter] My name is... Mei-Ling, Mei-Ling Ch-Chen"
+  - "[slow_speech] I don't know the... number. The appointment day? It is... Thursday"
+  - "[background_noise] Sorry, what you said? I not understand — can you say again more slow?"
+  - "[slow_speech] Yes... Thursday... two o'clock. That one. I cannot come"
+  - "Is okay? You cancel it? I need... confirmation? Like, email or message?"
+assertions:
+  - agent_does_not_rush_or_use_complex_vocabulary
+  - agent_asks_clarifying_questions_patiently
+  - agent_repeats_or_rephrases_when_not_understood
+  - agent_confirms_cancellation_clearly
+  - agent_offers_written_confirmation
+  - no_hallucinated_policy
+rubric:
+  instruction_following: 1.5
+  goal_completion: 1.5
+  interruption_handling: 1.0
+  csat_tone: 2.0
+  safety: 0.5

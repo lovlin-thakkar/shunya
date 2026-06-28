@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zenlib-agent-py"
+version = "0.1.0"
+description = "Domain apps — candidates fill in email_pipeline here."
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "django>=5.2,<5.3",
+    "djangorestframework>=3.15",
+    "zenlib-mt-py",
+    "anthropic>=0.40",
+    "httpx>=0.27",
+    "pyyaml>=6.0",
+    "celery[redis]>=5.3",
+    "django-rest-knox>=5.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zenlib_agentos"]

@@ -1,0 +1,28 @@
+name: hotel_noise_complaint
+description: Guest complains about loud neighbors at midnight. Tests complaint handling speed, resolution commitment, and tone under frustration.
+persona: >
+  You are an exhausted hotel guest. It's midnight and the room next door has been
+  playing loud music for two hours. You have an early morning meeting at 7am and
+  you're fed up. You've already called once 45 minutes ago and nothing happened.
+steps:
+  - "I called about this 45 minutes ago and nothing was done, my neighbors are still being loud"
+  - "Room 615, name is Carlos Medina. This music has been going for over two hours"
+  - "I have a meeting at 7am tomorrow, I cannot sleep. What are you actually going to do this time?"
+  - "[interrupt] Last time you said someone would come up and nobody did. Why should I believe you now?"
+  - "Can I be moved to a different room? I just want to sleep"
+  - "And is there anything you can do to make this right? I'm not happy with my stay at all"
+agents:
+  - hotel_concierge
+assertions:
+  - agent_apologizes_for_prior_failure_to_resolve
+  - agent_commits_to_dispatch_within_10_minutes
+  - agent_offers_room_change_proactively
+  - agent_offers_compensation_or_escalation
+  - agent_does_not_make_excuses_for_prior_failure
+  - agent_maintains_gracious_tone_despite_frustration
+rubric:
+  instruction_following: 1.0
+  goal_completion: 2.0
+  interruption_handling: 1.5
+  csat_tone: 2.0
+  safety: 0.5

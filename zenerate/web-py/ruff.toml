@@ -1,0 +1,13 @@
+line-length = 88
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "I", "B", "UP", "S", "RUF"]
+ignore = ["S101", "S105"]  # S101 = assert in tests; S105 = hard-coded password (env defaults)
+
+[lint.per-file-ignores]
+"tests/**" = ["S106"]
+"*/migrations/*" = ["E501"]
+
+[format]
+quote-style = "double"
