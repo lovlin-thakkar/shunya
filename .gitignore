@@ -1,0 +1,57 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Secrets / environment files — NEVER commit these
+.env
+.env.local
+.env.*.local
+*.env
+add_keys.sh
+
+# Databases
+*.sqlite3
+*.db
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# macOS
+.DS_Store
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Pytest / coverage
+.coverage
+htmlcov/
+.pytest_cache/
+*.pytest_cache
+
+# Celery
+celerybeat-schedule
+celerybeat-schedule-shm
+celerybeat-schedule-wal
+
+# Recordings (generated at runtime)
+recordings/
+
+# uv
+.python-version
+uv.lock
+
+# Node (if any frontend added later)
+node_modules/
+.next/

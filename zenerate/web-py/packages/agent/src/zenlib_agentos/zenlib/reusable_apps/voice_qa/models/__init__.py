@@ -4,13 +4,35 @@ import uuid
 
 from django.db import models
 
+from zenlib.reusable_apps.multitenant import context as _mt_context
 from zenlib.reusable_apps.multitenant.models import ActivityTenantBaseModel
 
 
-class TenantAPIKey(ActivityTenantBaseModel):
-    """Per-tenant API key for CLI / external callers. Hashed at rest."""
+class UUIDTenantModel(ActivityTenantBaseModel):
+    """Abstract base for models with a UUID PK.
+
+    ActivityTenantBaseModel._populate_tenant_if_needed() returns early if self.pk
+    is truthy, which is always the case for UUID fields with default=uuid.uuid4
+    (the UUID is generated at instantiation, before the first save). This override
+    uses self._state.adding to detect genuinely new instances instead.
+    """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    class Meta(ActivityTenantBaseModel.Meta):
+        abstract = True
+
+    def save(self, *args, **kwargs):
+        if not self.tenant_id and self._state.adding:
+            tenant = _mt_context.current_tenant.get()
+            if tenant is not None:
+                self.tenant_id = tenant.id
+        super().save(*args, **kwargs)
+
+
+class TenantAPIKey(UUIDTenantModel):
+    """Per-tenant API key for CLI / external callers. Hashed at rest."""
+
     key_hash = models.CharField(max_length=64, unique=True)
     key_prefix = models.CharField(max_length=8)
 
@@ -38,12 +60,11 @@ class TenantAPIKey(ActivityTenantBaseModel):
         return f"{self.key_prefix}... ({self.tenant})"
 
 
-class Agent(ActivityTenantBaseModel):
+class Agent(UUIDTenantModel):
     class Status(models.TextChoices):
         ACTIVE = "active"
         INACTIVE = "inactive"
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True, default="")
     system_prompt = models.TextField()
@@ -59,7 +80,7 @@ class Agent(ActivityTenantBaseModel):
         return self.name
 
 
-class Call(ActivityTenantBaseModel):
+class Call(UUIDTenantModel):
     class Status(models.TextChoices):
         IN_PROGRESS = "in_progress"
         COMPLETED = "completed"
@@ -70,7 +91,6 @@ class Call(ActivityTenantBaseModel):
         TEST_TEXT = "test_text"
         TEST_AUDIO = "test_audio"
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     agent = models.ForeignKey(Agent, on_delete=models.CASCADE, related_name="calls")
     source = models.CharField(max_length=20, choices=Source.choices, default=Source.HUMAN)
     daily_room_url = models.URLField(blank=True, default="")
@@ -86,9 +106,8 @@ class Call(ActivityTenantBaseModel):
         return f"Call {self.id} ({self.agent.name})"
 
 
-class Transcript(ActivityTenantBaseModel):
+class Transcript(UUIDTenantModel):
     # turns: [{speaker: "agent"|"caller", text: str, ts_ms: int, quirks: [str]}]
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     call = models.OneToOneField(Call, on_delete=models.CASCADE, related_name="transcript")
     turns = models.JSONField(default=list)
 
@@ -99,10 +118,9 @@ class Transcript(ActivityTenantBaseModel):
         return f"Transcript for {self.call_id}"
 
 
-class CallMetric(ActivityTenantBaseModel):
+class CallMetric(UUIDTenantModel):
     """Flexible key-value metric store per call. One row per metric name."""
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     call = models.ForeignKey(Call, on_delete=models.CASCADE, related_name="metrics")
     name = models.CharField(max_length=64)
     value = models.FloatField()
@@ -115,8 +133,7 @@ class CallMetric(ActivityTenantBaseModel):
         return f"{self.name}={self.value} (call {self.call_id})"
 
 
-class Scenario(ActivityTenantBaseModel):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+class Scenario(UUIDTenantModel):
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True, default="")
     yaml_content = models.TextField()
@@ -134,7 +151,7 @@ class Scenario(ActivityTenantBaseModel):
         return self.name
 
 
-class TestRun(ActivityTenantBaseModel):
+class TestRun(UUIDTenantModel):
     class Status(models.TextChoices):
         QUEUED = "queued"
         RUNNING = "running"
@@ -145,7 +162,6 @@ class TestRun(ActivityTenantBaseModel):
         TEXT = "text"
         AUDIO = "audio"
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     agent = models.ForeignKey(Agent, on_delete=models.CASCADE, related_name="test_runs")
     scenario = models.ForeignKey(Scenario, on_delete=models.CASCADE, related_name="test_runs")
     mode = models.CharField(max_length=10, choices=Mode.choices, default=Mode.TEXT)
@@ -166,8 +182,7 @@ class TestRun(ActivityTenantBaseModel):
         return f"TestRun {self.id} ({self.scenario.name}, {self.mode})"
 
 
-class TestResult(ActivityTenantBaseModel):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+class TestResult(UUIDTenantModel):
     test_run = models.OneToOneField(TestRun, on_delete=models.CASCADE, related_name="result")
     passed = models.BooleanField(default=False)
     transcript = models.JSONField(default=list)        # [{speaker, text, ts_ms, quirks}]
@@ -181,7 +196,7 @@ class TestResult(ActivityTenantBaseModel):
         return f"Result {status} for {self.test_run_id}"
 
 
-class JudgeScore(ActivityTenantBaseModel):
+class JudgeScore(UUIDTenantModel):
     RUBRIC_FIELDS = [
         "instruction_following",
         "goal_completion",
@@ -191,7 +206,6 @@ class JudgeScore(ActivityTenantBaseModel):
         "safety",
     ]
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     test_result = models.ForeignKey(TestResult, on_delete=models.CASCADE, related_name="scores")
     field = models.CharField(max_length=50)
     score = models.FloatField()      # 0.0–1.0
@@ -205,7 +219,7 @@ class JudgeScore(ActivityTenantBaseModel):
         return f"{self.field}: {self.score:.1f}"
 
 
-class AlertConfig(ActivityTenantBaseModel):
+class AlertConfig(UUIDTenantModel):
     class Operator(models.TextChoices):
         GT = "gt"
         LT = "lt"
@@ -213,7 +227,6 @@ class AlertConfig(ActivityTenantBaseModel):
         LTE = "lte"
         EQ = "eq"
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     agent = models.ForeignKey(Agent, on_delete=models.CASCADE, related_name="alerts")
     metric_name = models.CharField(max_length=100)
     operator = models.CharField(max_length=5, choices=Operator.choices)
@@ -238,8 +251,7 @@ class AlertConfig(ActivityTenantBaseModel):
         return ops[self.operator]
 
 
-class AlertEvent(ActivityTenantBaseModel):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+class AlertEvent(UUIDTenantModel):
     alert_config = models.ForeignKey(AlertConfig, on_delete=models.CASCADE, related_name="events")
     call = models.ForeignKey(Call, on_delete=models.CASCADE, related_name="alert_events")
     metric_value = models.FloatField()

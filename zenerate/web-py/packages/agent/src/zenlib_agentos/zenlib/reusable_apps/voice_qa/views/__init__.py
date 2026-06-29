@@ -4,14 +4,14 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from .models import Agent, Call, Transcript, CallMetric, Scenario, TestRun, TestResult, AlertConfig, AlertEvent
-from .serializers import (
+from ..models import Agent, Call, Transcript, CallMetric, Scenario, TestRun, TestResult, AlertConfig, AlertEvent
+from ..serializers import (
     AgentSerializer, CallSerializer, TranscriptSerializer, CallMetricSerializer,
     ScenarioSerializer, TestRunSerializer, TestResultSerializer,
     AlertConfigSerializer, AlertEventSerializer,
 )
-from .services.chat import AgentChat
-from .tasks import run_scenario_task
+from ..services.chat import AgentChat
+from ..tasks import run_scenario_task
 
 # Module-level cache: conversation_id → AgentChat. In multi-process deployments use Redis.
 _chat_sessions: dict[str, AgentChat] = {}

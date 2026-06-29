@@ -14,12 +14,12 @@ from zenlib.reusable_apps.multitenant.models import Tenant
 
 @pytest.fixture
 def tenant_a(db) -> Tenant:
-    return Tenant.objects.create(name="Tenant A", slug="tenant-a")
+    return Tenant.objects.create(name="Tenant A", slug="tenant-a", service_token="svc-a")
 
 
 @pytest.fixture
 def tenant_b(db) -> Tenant:
-    return Tenant.objects.create(name="Tenant B", slug="tenant-b")
+    return Tenant.objects.create(name="Tenant B", slug="tenant-b", service_token="svc-b")
 
 
 @pytest.fixture
