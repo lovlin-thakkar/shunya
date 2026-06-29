@@ -523,6 +523,36 @@ export function NewScenarioModal({ onClose }: Props) {
                 Add message
                 <span style={{ color: "var(--blue-bd)", fontSize: "10px" }}>↵ Enter</span>
               </button>
+
+              {/* Voice Quirks reference */}
+              <div
+                className="mt-3 rounded-lg px-3 py-2.5"
+                style={{ background: "var(--amber-bg)", border: "1px solid rgba(217,119,6,0.15)" }}
+              >
+                <p className="text-xs font-medium mb-1.5" style={{ color: "var(--amber)" }}>
+                  Voice Quirks — inline annotations for audio mode
+                </p>
+                <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                  {[
+                    ["[stutter]", "simulates stuttering"],
+                    ["[slow_speech]", "slow/hesitant delivery"],
+                    ["[pause:3s]", "adds a silence pause"],
+                    ["[interrupt]", "mid-sentence interruption"],
+                    ["[background_noise]", "noisy environment"],
+                    ['[hard_input:"text"]', "hard to understand"],
+                    ['[email:"x@y.com"]', "spoken email address"],
+                    ['[phone:"415-555-0192"]', "spoken phone number"],
+                  ].map(([tag, desc]) => (
+                    <div key={tag} className="flex items-baseline gap-1.5">
+                      <code className="text-xs flex-shrink-0 font-mono" style={{ color: "var(--amber)", fontSize: "10px" }}>{tag}</code>
+                      <span className="text-xs" style={{ color: "var(--ink-3)", fontSize: "10px" }}>{desc}</span>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-xs mt-1.5" style={{ color: "var(--ink-3)", fontSize: "10px" }}>
+                  Example: <code className="font-mono" style={{ color: "var(--amber)" }}>[stutter] I w-want a refund</code> — stripped in text mode, played as-is in audio mode.
+                </p>
+              </div>
             </div>
 
             {/* Pass/fail checks */}

@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from config import DEFAULT_VOICE_ID
+from config import DEFAULT_VOICE_ID, CALLER_DEFAULT_VOICE_ID
 from pipeline import run_voice_agent
 
 logging.basicConfig(level=logging.INFO)
@@ -29,6 +29,11 @@ AGENT_READY: dict[str, asyncio.Event] = {}
 
 # Track background pipeline tasks so exceptions are not silently lost.
 _PIPELINE_TASKS: dict[str, asyncio.Task] = {}
+
+# Limit concurrent active pipelines so Daily.co API and the caller service
+# are not overwhelmed when run-evals fires many audio runs in parallel.
+# Callers that exceed this get 429 and Celery retries them with backoff.
+MAX_CONCURRENT_PIPELINES = 4
 
 
 async def _create_daily_room(room_name: str) -> dict:
@@ -75,7 +80,19 @@ async def connect(req: ConnectRequest):
     """
     Called by Django to provision a room and start the voice pipeline.
     Returns the room_url for the human caller to join.
+
+    Capped at MAX_CONCURRENT_PIPELINES simultaneous active calls.  Excess
+    requests receive 429 so the Celery task can retry with backoff instead of
+    hammering Daily.co and getting 502 errors under load.
     """
+    active = len(_PIPELINE_TASKS)
+    if active >= MAX_CONCURRENT_PIPELINES:
+        logger.warning(f"Pipeline capacity full ({active}/{MAX_CONCURRENT_PIPELINES}), rejecting connect")
+        raise HTTPException(
+            status_code=429,
+            detail=f"Pipeline at capacity ({active} active). Retry shortly.",
+        )
+
     room_name = req.room_name or f"shunya-{req.agent_id[:8]}-{int(asyncio.get_event_loop().time())}"
 
     try:
@@ -110,7 +127,7 @@ async def connect(req: ConnectRequest):
     task.add_done_callback(
         lambda t: (
             _PIPELINE_TASKS.pop(room_url, None),
-            logger.error(f"Pipeline {room_name} raised: {t.exception()}") if t.exception() else None,
+            logger.error(f"Pipeline {room_name} raised: {t.exception()}") if not t.cancelled() and t.exception() else None,
         )
     )
 
@@ -158,7 +175,7 @@ async def caller_run(req: CallerRunRequest):
                     "room_url": req.room_url,
                     "room_token": req.room_token,
                     "steps": req.steps,
-                    "voice_id": req.voice_id,
+                    "voice_id": CALLER_DEFAULT_VOICE_ID,
                     "recording_id": req.recording_id,
                 },
             )

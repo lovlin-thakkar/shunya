@@ -61,11 +61,17 @@ def run_scenario(test_run_id: str):
         run.save(update_fields=["status", "completed_at"])
         logger.info(f"TestRun {test_run_id} completed. Assertions passed: {assertions_passed}")
 
+    except TestRun.DoesNotExist:
+        logger.warning(f"TestRun {test_run_id} was deleted before results could be saved — discarding")
+        return
     except Exception as e:
         logger.exception(f"TestRun {test_run_id} failed: {e}")
-        run.status = TestRun.Status.FAILED
-        run.completed_at = timezone.now()
-        run.save(update_fields=["status", "completed_at"])
+        try:
+            run.status = TestRun.Status.FAILED
+            run.completed_at = timezone.now()
+            run.save(update_fields=["status", "completed_at"])
+        except Exception:
+            pass  # run may have been deleted; nothing to do
 
 
 def _evaluate_assertions(assertions, transcript, agent):
