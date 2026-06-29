@@ -35,7 +35,7 @@ console = Console()
 @agents_app.command("list")
 def agents_list():
     """List all agents."""
-    data = client.get("/api/agents/")
+    data = client.get("/api/v1/agents/")
     results = data.get("results", data) if isinstance(data, dict) else data
     t = Table("ID", "Name", "Created")
     t.columns[0].min_width = 36
@@ -50,14 +50,14 @@ def agents_create(
     system_prompt: str = typer.Option(..., "--prompt", "-p", help="System prompt"),
 ):
     """Create a new agent."""
-    a = client.post("/api/agents/", {"name": name, "system_prompt": system_prompt})
+    a = client.post("/api/v1/agents/", {"name": name, "system_prompt": system_prompt})
     rprint(Panel(f"[green]Created agent[/green]\nID: {a['id']}\nName: {a['name']}"))
 
 
 @agents_app.command("show")
 def agents_show(agent_id: str):
     """Show agent details."""
-    a = client.get(f"/api/agents/{agent_id}/")
+    a = client.get(f"/api/v1/agents/{agent_id}/")
     rprint(a)
 
 
@@ -71,7 +71,7 @@ def agents_chat(
     payload = {"message": message}
     if conversation_id:
         payload["conversation_id"] = conversation_id
-    r = client.post(f"/api/agents/{agent_id}/chat/", payload)
+    r = client.post(f"/api/v1/agents/{agent_id}/chat/", payload)
     rprint(Panel(
         f"[bold]Agent:[/bold] {r['response']}\n\n"
         f"[dim]conversation_id: {r['conversation_id']} | latency: {r['ts_ms']}ms[/dim]"
@@ -89,7 +89,7 @@ def agents_connect(
     and returns a pre-authed join link. Open it, unmute, and speak to the agent.
     Requires the pipecat voice server (:8001) to be running.
     """
-    r = client.post(f"/api/agents/{agent_id}/connect/", {})
+    r = client.post(f"/api/v1/agents/{agent_id}/connect/", {})
     join_url = r.get("observer_url") or r.get("room_url")
     rprint(Panel(
         f"[green]Agent is live.[/green] Open the link, unmute, and start talking.\n\n"
@@ -106,7 +106,7 @@ def agents_connect(
 @scenarios_app.command("list")
 def scenarios_list():
     """List all scenarios."""
-    data = client.get("/api/scenarios/")
+    data = client.get("/api/v1/scenarios/")
     results = data.get("results", data) if isinstance(data, dict) else data
     t = Table("Name", "Description", "Steps")
     for s in results:
@@ -117,7 +117,7 @@ def scenarios_list():
 @scenarios_app.command("show")
 def scenarios_show(name: str):
     """Show a scenario's YAML content."""
-    data = client.get("/api/scenarios/")
+    data = client.get("/api/v1/scenarios/")
     results = data.get("results", data) if isinstance(data, dict) else data
     scenario = next((s for s in results if s["name"] == name), None)
     if not scenario:
@@ -136,7 +136,7 @@ def tests_run(
     wait: bool = typer.Option(False, "--wait", "-w", help="Poll until run completes"),
 ):
     """Trigger a test run for an agent."""
-    run = client.post("/api/test-runs/", {"agent": agent_id, "scenario": scenario, "mode": mode})
+    run = client.post("/api/v1/test-runs/", {"agent": agent_id, "scenario": scenario, "mode": mode})
     rprint(Panel(
         f"[green]Test run queued[/green]\n"
         f"ID: {run['id']}\nStatus: {run['status']}\nMode: {mode}"
@@ -149,7 +149,7 @@ def tests_run(
         console.print("[dim]Polling for completion…[/dim]")
         for _ in range(60):
             time.sleep(3)
-            r = client.get(f"/api/test-runs/{run_id}/")
+            r = client.get(f"/api/v1/test-runs/{run_id}/")
             status = r.get("status")
             console.print(f"  status: {status}")
             # Print observer URL once it's available (set right after room provisioning)
@@ -205,19 +205,19 @@ def tests_run_all(
     scenario_filter: Optional[str] = typer.Option(None, "--scenario", help="Only run this scenario"),
 ):
     """
-    Run every scenario against its compatible agent(s).
+    Run all scenarios in parallel (sub-agent orchestration via Celery group).
 
-    Scenarios with no 'agents' field in their YAML run against a default
-    agent named 'demo_support_agent' (if one exists).
+    Each scenario is dispatched as a parallel sub-agent via POST /agents/{id}/run-evals/.
+    All runs start simultaneously — this is the sub-agent eval pattern where topics are
+    known upfront and evaluated concurrently.
 
-    The mapping is declared in each scenario YAML under the 'agents:' key.
-    Omitting the key means the scenario is generic and runs against the
-    default agent only.
+    Scenarios are matched to agents via the 'compatible_agents' field in their YAML.
+    Scenarios with no 'compatible_agents' run against the default agent 'demo_support_agent'.
     """
     import time
 
     # Fetch all agents (name → id)
-    agents_data = client.get("/api/agents/")
+    agents_data = client.get("/api/v1/agents/")
     agents_list = agents_data.get("results", agents_data) if isinstance(agents_data, dict) else agents_data
     agent_by_name = {a["name"]: a["id"] for a in agents_list}
 
@@ -226,11 +226,11 @@ def tests_run_all(
         raise typer.Exit(1)
 
     # Fetch all scenarios
-    scenarios_data = client.get("/api/scenarios/")
+    scenarios_data = client.get("/api/v1/scenarios/")
     scenarios_list = scenarios_data.get("results", scenarios_data) if isinstance(scenarios_data, dict) else scenarios_data
 
-    # Build (agent_name, scenario_name) pairs from compatible_agents mapping
-    pairs: list[tuple[str, str]] = []
+    # Group scenarios by agent for efficient parallel dispatch
+    agent_scenarios: dict[str, list[str]] = {}  # agent_name → [scenario_names]
     default_agent = "demo_support_agent"
 
     for s in scenarios_list:
@@ -245,52 +245,59 @@ def tests_run_all(
             if agent_name not in agent_by_name:
                 rprint(f"[yellow]  Skipping '{scenario_name}' — agent '{agent_name}' not found[/yellow]")
                 continue
-            pairs.append((agent_name, scenario_name))
+            agent_scenarios.setdefault(agent_name, []).append(scenario_name)
 
-    if not pairs:
+    if not agent_scenarios:
         rprint("[yellow]No matching agent-scenario pairs found.[/yellow]")
         raise typer.Exit(0)
 
-    # Display the run plan
-    plan_table = Table("Agent", "Scenario", "Mode", title="Run plan")
-    for agent_name, scenario_name in pairs:
-        plan_table.add_row(agent_name, scenario_name, mode)
+    # Show plan
+    plan_table = Table("Agent", "Scenarios", "Mode", title="Parallel eval plan")
+    for agent_name, scenario_names in agent_scenarios.items():
+        plan_table.add_row(agent_name, ", ".join(scenario_names), mode)
     console.print(plan_table)
     console.print()
 
-    # Dispatch all runs
-    run_ids: list[tuple[str, str, str]] = []  # (run_id, agent_name, scenario_name)
-    for agent_name, scenario_name in pairs:
+    # Dispatch all runs in parallel via run-evals (Celery group per agent)
+    all_runs: list[tuple[str, str, str]] = []  # (run_id, agent_name, scenario_name)
+    for agent_name, scenario_names in agent_scenarios.items():
         agent_id = agent_by_name[agent_name]
         try:
-            run = client.post("/api/test-runs/", {"agent": agent_id, "scenario": scenario_name, "mode": mode})
-            run_ids.append((run["id"], agent_name, scenario_name))
-            console.print(f"  [green]Queued[/green]  {agent_name} × {scenario_name}  ({run['id'][:8]}…)")
+            resp = client.post(
+                f"/api/v1/agents/{agent_id}/run-evals/",
+                {"scenario_names": scenario_names, "mode": mode},
+            )
+            parallelism = resp.get("parallelism", len(resp.get("runs", [])))
+            console.print(
+                f"  [green]Dispatched[/green] {parallelism} parallel sub-agents for [bold]{agent_name}[/bold]"
+                f"  (group: {(resp.get('group_id') or '')[:8]}…)"
+            )
+            for run in resp.get("runs", []):
+                all_runs.append((run["id"], agent_name, run.get("scenario", "")))
         except client.ShunyaError as e:
-            console.print(f"  [red]Failed to queue[/red]  {agent_name} × {scenario_name}: {e}")
+            console.print(f"  [red]Failed to dispatch[/red]  {agent_name}: {e}")
 
-    if not wait or not run_ids:
+    if not wait or not all_runs:
         return
 
-    console.print(f"\n[dim]Polling {len(run_ids)} run(s) for completion…[/dim]\n")
+    console.print(f"\n[dim]Polling {len(all_runs)} parallel run(s)…[/dim]\n")
 
-    # Track state per run
     done: dict[str, dict] = {}
-    pending = {rid: (agent, scenario) for rid, agent, scenario in run_ids}
+    pending = {rid: (agent, scenario) for rid, agent, scenario in all_runs}
 
-    for _ in range(120):  # max ~6 minutes per poll cycle
+    for _ in range(120):
         time.sleep(3)
         still_pending = {}
         for rid, (agent_name, scenario_name) in list(pending.items()):
             try:
-                r = client.get(f"/api/test-runs/{rid}/")
+                r = client.get(f"/api/v1/test-runs/{rid}/")
             except client.ShunyaError:
                 still_pending[rid] = (agent_name, scenario_name)
                 continue
-            status = r.get("status")
-            if status in ("completed", "failed"):
+            run_status = r.get("status")
+            if run_status in ("completed", "failed"):
                 done[rid] = r
-                console.print(f"  [dim]{rid[:8]}…[/dim]  {agent_name} × {scenario_name}  → {status}")
+                console.print(f"  [dim]{rid[:8]}…[/dim]  {agent_name} × {scenario_name}  → {run_status}")
             else:
                 still_pending[rid] = (agent_name, scenario_name)
         pending = still_pending
@@ -299,26 +306,21 @@ def tests_run_all(
     else:
         console.print(f"\n[yellow]{len(pending)} run(s) still in progress — check manually.[/yellow]")
 
-    # Summary table
     if done:
         console.print()
         summary = Table("Agent", "Scenario", "Status", "Pass", "Score", title="Results summary")
-        for rid, (agent_name, scenario_name) in [(r, (a, s)) for r, a, s in run_ids if r in done]:
+        for rid, (agent_name, scenario_name) in [(r, (a, s)) for r, a, s in all_runs if r in done]:
             r = done[rid]
-            status = r.get("status", "")
+            run_status = r.get("status", "")
             result = r.get("result")
             if result:
                 passed = "[green]PASS[/green]" if result.get("passed") else "[red]FAIL[/red]"
                 scores = result.get("scores", [])
-                if scores:
-                    avg = sum(sc["score"] for sc in scores) / len(scores)
-                    score_str = f"{avg:.2f}"
-                else:
-                    score_str = "pending"
+                score_str = f"{sum(sc['score'] for sc in scores) / len(scores):.2f}" if scores else "pending"
             else:
                 passed = "—"
                 score_str = "—"
-            summary.add_row(agent_name, scenario_name, status, passed, score_str)
+            summary.add_row(agent_name, scenario_name, run_status, passed, score_str)
         console.print(summary)
 
 
@@ -330,7 +332,7 @@ def tests_list(
     params = {}
     if agent_id:
         params["agent"] = agent_id
-    data = client.get("/api/test-runs/", **params)
+    data = client.get("/api/v1/test-runs/", **params)
     results = data.get("results", data) if isinstance(data, dict) else data
     t = Table("ID", "Agent", "Scenario", "Mode", "Status", "Passed")
     t.columns[0].min_width = 36
@@ -352,7 +354,7 @@ def tests_list(
 @tests_app.command("show")
 def tests_show(run_id: str):
     """Show details of a test run including judge scores."""
-    r = client.get(f"/api/test-runs/{run_id}/")
+    r = client.get(f"/api/v1/test-runs/{run_id}/")
     _print_run_result(r)
 
 
@@ -363,7 +365,7 @@ def tests_transcript(
     no_color: bool = typer.Option(False, "--no-color", help="Plain text output"),
 ):
     """Print the conversation transcript from a test run."""
-    r = client.get(f"/api/test-runs/{run_id}/")
+    r = client.get(f"/api/v1/test-runs/{run_id}/")
     result = r.get("result")
 
     if not result:
@@ -439,7 +441,7 @@ def calls_list(
     params = {}
     if agent_id:
         params["agent"] = agent_id
-    data = client.get("/api/calls/", **params)
+    data = client.get("/api/v1/calls/", **params)
     results = data.get("results", data) if isinstance(data, dict) else data
     t = Table("ID", "Agent", "Source", "Status", "Started")
     t.columns[0].min_width = 36
@@ -458,7 +460,7 @@ def calls_list(
 @calls_app.command("transcript")
 def calls_transcript(call_id: str):
     """Print a call's transcript."""
-    data = client.get(f"/api/calls/{call_id}/transcript/")
+    data = client.get(f"/api/v1/calls/{call_id}/transcript/")
     for turn in data.get("turns", []):
         speaker = turn["speaker"].upper()
         quirks = f" [{', '.join(turn['quirks'])}]" if turn.get("quirks") else ""
@@ -468,7 +470,7 @@ def calls_transcript(call_id: str):
 @calls_app.command("metrics")
 def calls_metrics(call_id: str):
     """Show metrics for a call."""
-    data = client.get(f"/api/calls/{call_id}/metrics/")
+    data = client.get(f"/api/v1/calls/{call_id}/metrics/")
     t = Table("Metric", "Value")
     for m in data:
         t.add_row(m["name"], str(round(m["value"], 2)))

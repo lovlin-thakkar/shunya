@@ -136,6 +136,41 @@ def test_service_token_auth(tenant_a, in_tenant):
     assert resp.status_code in (401, 403)
 
 
+def test_run_evals_parallel(client_a, tenant_a, in_tenant):
+    """run-evals creates N TestRun objects in one request (parallel sub-agent dispatch)."""
+    from unittest.mock import MagicMock, patch
+
+    client, tenant = client_a
+    with in_tenant(tenant):
+        agent = Agent.objects.create(name="Eval Agent", system_prompt="You are helpful.")
+        Scenario.objects.create(
+            name="scenario_a", yaml_content="name: scenario_a\npersona: x\nsteps: []", persona="x",
+        )
+        Scenario.objects.create(
+            name="scenario_b", yaml_content="name: scenario_b\npersona: y\nsteps: []", persona="y",
+        )
+
+    # Mock Celery group dispatch — we verify endpoint logic, not worker execution
+    fake_result = MagicMock()
+    fake_result.id = "fake-group-id"
+    fake_result.results = [MagicMock(id=f"task-{i}") for i in range(2)]
+
+    with patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.views.celery_group") as mock_group:
+        mock_group.return_value.apply_async.return_value = fake_result
+        with in_tenant(tenant):
+            resp = client.post(
+                f"/api/v1/agents/{agent.id}/run-evals/",
+                {"scenario_names": ["scenario_a", "scenario_b"], "mode": "text"},
+                format="json",
+            )
+
+    assert resp.status_code == 201, resp.data
+    assert resp.data["parallelism"] == 2
+    assert len(resp.data["runs"]) == 2
+    assert resp.data["group_id"] == "fake-group-id"
+    mock_group.assert_called_once()
+
+
 def test_service_token_auth_valid(tenant_a, in_tenant):
     """Valid service token + tenant resolves correctly."""
     with in_tenant(tenant_a):

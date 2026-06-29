@@ -1,4 +1,5 @@
 import httpx
+from celery import group as celery_group
 from django.conf import settings
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -76,6 +77,52 @@ class AgentViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         serializer.save(agent=agent)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="run-evals")
+    def run_evals(self, request, pk=None):
+        """Spawn parallel sub-agents: one per scenario, all dispatched simultaneously via Celery group.
+
+        Body (optional):
+          scenario_names: ["s1", "s2"]  — subset; omit to run all scenarios
+          mode: "text" | "audio"         — default text
+        """
+        from zenlib.reusable_apps.multitenant import context
+        agent = self.get_object()
+        mode = request.data.get("mode", TestRun.Mode.TEXT)
+        scenario_names = request.data.get("scenario_names") or []
+        tenant = context.current_tenant.get()
+
+        qs = Scenario.objects.all()
+        if scenario_names:
+            qs = qs.filter(name__in=scenario_names)
+
+        scenarios = list(qs)
+        if not scenarios:
+            return Response({"error": "No matching scenarios found"}, status=404)
+
+        # Create all TestRun rows first, then dispatch as a Celery group for true parallelism.
+        runs = [
+            TestRun.objects.create(agent=agent, scenario=s, mode=mode)
+            for s in scenarios
+        ]
+        task_group = celery_group(
+            run_scenario_task.s(str(r.id), tenant.id) for r in runs
+        )
+        group_result = task_group.apply_async()
+
+        # Persist task IDs for observability
+        for run, task in zip(runs, group_result.results):
+            run.celery_task_id = task.id
+            run.save(update_fields=["celery_task_id"])
+
+        return Response(
+            {
+                "group_id": group_result.id,
+                "runs": TestRunSerializer(runs, many=True).data,
+                "parallelism": len(runs),
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class CallViewSet(viewsets.ReadOnlyModelViewSet):
