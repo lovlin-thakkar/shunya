@@ -27,13 +27,15 @@ services:
 
   django:
     build:
-      context: ./apps/api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: apps/api/Dockerfile
     command: uv run python manage.py runserver 0.0.0.0:8000
+    working_dir: /app/apps/api
     volumes:
       - .:/app
-      - ../../scenarios:/scenarios
-      - ../../agents:/agents
+      - django_venv:/app/.venv
+      - ./scenarios:/scenarios
+      - ./agents:/agents
       - recordings:/recordings
     ports:
       - "8000:8000"
@@ -54,13 +56,15 @@ services:
 
   celery_worker:
     build:
-      context: ./apps/api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: apps/api/Dockerfile
     command: uv run celery -A zenapi.celery worker --loglevel=info
+    working_dir: /app/apps/api
     volumes:
       - .:/app
-      - ../../scenarios:/scenarios
-      - ../../agents:/agents
+      - django_venv:/app/.venv
+      - ./scenarios:/scenarios
+      - ./agents:/agents
     env_file:
       - ./apps/api/.env
     environment:
@@ -78,11 +82,13 @@ services:
 
   celery_beat:
     build:
-      context: ./apps/api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: apps/api/Dockerfile
     command: uv run celery -A zenapi.celery beat --loglevel=info
+    working_dir: /app/apps/api
     volumes:
       - .:/app
+      - django_venv:/app/.venv
     env_file:
       - ./apps/api/.env
     environment:
@@ -131,3 +137,4 @@ services:
 volumes:
   pgdata: {}
   recordings: {}
+  django_venv: {}

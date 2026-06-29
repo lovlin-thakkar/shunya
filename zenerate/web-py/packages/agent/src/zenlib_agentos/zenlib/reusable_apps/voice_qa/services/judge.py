@@ -5,6 +5,7 @@ import re
 import anthropic
 from django.conf import settings
 
+from zenlib.reusable_apps.multitenant import context
 from ..models import TestResult, JudgeScore
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,7 @@ def evaluate_result(test_result_id: str, rubric: dict):
         logger.error(f"Judge returned non-JSON for TestResult {test_result_id}: {raw}")
         return
 
+    tenant = context.current_tenant.get()
     scores_data = parsed.get("scores", {})
     judge_scores = []
     for field, data in scores_data.items():
@@ -89,6 +91,7 @@ def evaluate_result(test_result_id: str, rubric: dict):
             judge_scores.append(JudgeScore(
                 test_result=result, field=field, score=score,
                 reasoning=data.get("reasoning", ""), passed=score >= 0.7,
+                tenant=tenant,
             ))
     JudgeScore.objects.bulk_create(judge_scores)
 

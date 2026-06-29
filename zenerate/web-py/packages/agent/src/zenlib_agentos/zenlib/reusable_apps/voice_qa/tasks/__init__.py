@@ -5,7 +5,7 @@ from celery import shared_task
 def run_scenario_task(self, test_run_id: str, tenant_id: int):
     from zenlib.reusable_apps.multitenant import context
     from zenlib.reusable_apps.multitenant.models import Tenant
-    from .services.runner import run_scenario
+    from ..services.runner import run_scenario
     try:
         tenant = Tenant.objects.get(id=tenant_id)
         context.current_tenant.set(tenant)
@@ -18,7 +18,7 @@ def run_scenario_task(self, test_run_id: str, tenant_id: int):
 def run_judge_task(self, test_result_id: str, rubric: dict, tenant_id: int):
     from zenlib.reusable_apps.multitenant import context
     from zenlib.reusable_apps.multitenant.models import Tenant
-    from .services.judge import evaluate_result
+    from ..services.judge import evaluate_result
     try:
         tenant = Tenant.objects.get(id=tenant_id)
         context.current_tenant.set(tenant)
@@ -31,7 +31,7 @@ def run_judge_task(self, test_result_id: str, rubric: dict, tenant_id: int):
 def compute_call_metrics(call_id: str, tenant_id: int):
     from zenlib.reusable_apps.multitenant import context
     from zenlib.reusable_apps.multitenant.models import Tenant
-    from .services.metrics import compute_metrics
+    from ..services.metrics import compute_metrics
     tenant = Tenant.objects.get(id=tenant_id)
     context.current_tenant.set(tenant)
     compute_metrics(call_id)

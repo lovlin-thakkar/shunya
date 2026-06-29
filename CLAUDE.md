@@ -4,12 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Layout
 
-This repo contains two implementations of Shunya:
-
-- **`django_api/` + `pipecat_agent/`** — the original working submission (django-tenants, schema-per-tenant)
-- **`zenerate/web-py/`** — rebased onto the zenerate baseline (zenlib-mt-py, RLS single-schema). This is the preferred implementation going forward.
-
-For everyday development, use the zenerate/web-py layout. The original django_api/ is kept as reference.
+```
+zenerate/web-py/        ← the entire active codebase
+├── apps/api/           ← Django API (control plane)
+├── packages/           ← shared Python packages (zenlib-mt-py, zenlib-agent-py)
+├── services/voice/     ← Pipecat agent + caller bot
+├── cli/                ← shunya CLI
+├── scenarios/          ← scenario YAML files
+├── agents/             ← agent YAML files
+└── docker-compose.yml
+```
 
 ## What This Is
 
@@ -19,7 +23,7 @@ Shunya is a voice AI QA platform. It has three runtime services:
 2. **Pipecat agent server** (`zenerate/web-py/services/voice/server.py`, :8001) — voice runtime: FastAPI + Daily.co WebRTC + ElevenLabs Scribe v2 STT + Claude Haiku + ElevenLabs TTS (the agent under test)
 3. **Caller bot service** (`zenerate/web-py/services/voice/caller_server.py`, :8002) — the synthetic caller (`ScenarioCallerBot`) for audio mode; a **separate process** because `daily-python` allows only one `CallClient`/`Daily.init()` per process
 
-Plus a CLI (`cli/`) that wraps the Django REST API.
+Plus a CLI (`zenerate/web-py/cli/`) that wraps the Django REST API.
 
 **Run with Docker.** `docker-compose up` from `zenerate/web-py/` runs the whole stack. The voice services (`pipecat`, `caller`) are pinned to `python:3.12` on `linux/amd64` — `daily-python` has no Python 3.14 wheels and misbehaves on ARM64. For the deeper audio-mode engineering notes, see `TECH_SPEC.md` → "Audio Mode — Engineering Notes".
 
@@ -37,10 +41,10 @@ uv sync --all-packages
 uv run python manage.py migrate
 
 # Load scenario YAML files into DB
-uv run python manage.py load_scenarios --dir ../../../../scenarios
+uv run python manage.py load_scenarios --dir ../../scenarios
 
 # Load agents from YAML
-uv run python manage.py load_agents --dir ../../../../agents
+uv run python manage.py load_agents --dir ../../agents
 
 # Dev server (port 8000)
 uv run python manage.py runserver
