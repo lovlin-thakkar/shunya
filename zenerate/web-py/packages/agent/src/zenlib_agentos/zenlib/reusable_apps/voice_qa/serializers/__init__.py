@@ -61,13 +61,14 @@ class TestResultSerializer(serializers.ModelSerializer):
 
 class TestRunSerializer(serializers.ModelSerializer):
     result = TestResultSerializer(read_only=True)
+    scenario_name = serializers.CharField(source="scenario.name", read_only=True)
 
     class Meta:
         model = TestRun
-        fields = ["id", "agent", "scenario", "mode", "status",
+        fields = ["id", "agent", "scenario", "scenario_name", "mode", "status",
                   "started_at", "completed_at", "created_at", "observer_url", "result"]
-        read_only_fields = ["id", "status", "started_at", "completed_at", "created_at",
-                            "observer_url", "result"]
+        read_only_fields = ["id", "scenario_name", "status", "started_at", "completed_at",
+                            "created_at", "observer_url", "result"]
 
 
 class AlertConfigSerializer(serializers.ModelSerializer):

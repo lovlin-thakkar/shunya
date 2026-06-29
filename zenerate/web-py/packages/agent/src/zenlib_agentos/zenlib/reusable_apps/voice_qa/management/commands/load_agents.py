@@ -22,7 +22,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument(
             "--dir",
-            default=str(Path(__file__).resolve().parents[7] / "agents"),
+            default=str(Path(__file__).resolve().parents[9] / "agents"),
             help="Directory containing YAML agent files",
         )
         parser.add_argument("--force", action="store_true", help="Overwrite existing agents")

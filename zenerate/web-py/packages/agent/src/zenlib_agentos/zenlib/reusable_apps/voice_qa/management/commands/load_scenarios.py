@@ -23,7 +23,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument(
             "--dir",
-            default=str(Path(__file__).resolve().parents[7] / "scenarios"),
+            default=str(Path(__file__).resolve().parents[9] / "scenarios"),
             help="Directory containing YAML scenario files",
         )
         parser.add_argument("--force", action="store_true", help="Overwrite existing scenarios")

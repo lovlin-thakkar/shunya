@@ -273,7 +273,7 @@ def tests_run_all(
                 f"  (group: {(resp.get('group_id') or '')[:8]}…)"
             )
             for run in resp.get("runs", []):
-                all_runs.append((run["id"], agent_name, run.get("scenario", "")))
+                all_runs.append((run["id"], agent_name, run.get("scenario_name") or run.get("scenario", "")))
         except client.ShunyaError as e:
             console.print(f"  [red]Failed to dispatch[/red]  {agent_name}: {e}")
 
