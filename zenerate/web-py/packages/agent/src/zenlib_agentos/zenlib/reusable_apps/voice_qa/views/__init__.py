@@ -188,6 +188,12 @@ class TestRunViewSet(viewsets.ModelViewSet):
         except TestResult.DoesNotExist:
             return Response({"error": "No results yet"}, status=404)
 
+    @action(detail=False, methods=["delete"], url_path="clear")
+    def clear(self, request):
+        """Delete all test runs for the current tenant."""
+        deleted, _ = self.get_queryset().delete()
+        return Response({"deleted": deleted})
+
 
 class AlertConfigViewSet(viewsets.ModelViewSet):
     serializer_class = AlertConfigSerializer

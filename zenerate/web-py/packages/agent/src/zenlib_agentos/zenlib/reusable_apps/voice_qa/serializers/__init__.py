@@ -37,11 +37,47 @@ class CallMetricSerializer(serializers.ModelSerializer):
 
 
 class ScenarioSerializer(serializers.ModelSerializer):
+    yaml_content = serializers.CharField(allow_blank=True, required=False, default="")
+    persona = serializers.CharField(allow_blank=True, required=False, default="")
+
     class Meta:
         model = Scenario
         fields = ["id", "name", "description", "yaml_content", "persona",
                   "steps", "assertions", "rubric", "compatible_agents", "created_at", "updated_at"]
-        read_only_fields = ["id", "steps", "assertions", "compatible_agents", "created_at", "updated_at"]
+        read_only_fields = ["id", "compatible_agents", "created_at", "updated_at"]
+
+    def validate(self, data):
+        # Auto-generate minimal yaml_content when creating via UI (yaml_content not provided)
+        if not data.get("yaml_content"):
+            import yaml as _yaml
+            doc = {"name": data.get("name", "")}
+            if data.get("persona"):
+                doc["persona"] = data["persona"]
+            steps = data.get("steps", [])
+            if steps:
+                doc["steps"] = [s.get("raw", s.get("text", "")) if isinstance(s, dict) else s for s in steps]
+            if data.get("assertions"):
+                doc["assertions"] = data["assertions"]
+            if data.get("rubric"):
+                doc["rubric"] = data["rubric"]
+            data["yaml_content"] = _yaml.dump(doc, allow_unicode=True, default_flow_style=False)
+        return data
+
+    def validate_steps(self, value):
+        # Accept either plain strings or full step dicts; normalise to [{text, raw, quirks}]
+        normalised = []
+        for item in value:
+            if isinstance(item, str):
+                normalised.append({"text": item, "raw": item, "quirks": []})
+            elif isinstance(item, dict):
+                normalised.append({
+                    "text": item.get("text", item.get("raw", "")),
+                    "raw": item.get("raw", item.get("text", "")),
+                    "quirks": item.get("quirks", []),
+                })
+            else:
+                raise serializers.ValidationError("Each step must be a string or object.")
+        return normalised
 
 
 class JudgeScoreSerializer(serializers.ModelSerializer):

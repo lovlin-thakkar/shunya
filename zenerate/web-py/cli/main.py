@@ -38,10 +38,10 @@ def agents_list():
     data = client.get("/api/v1/agents/")
     results = data.get("results", data) if isinstance(data, dict) else data
     t = Table("ID", "Name", "Created")
-    t.columns[0].min_width = 36
+    t.columns[0].no_wrap = True
     for a in results:
         t.add_row(a["id"], a["name"], a.get("created_at", "")[:10])
-    console.print(t)
+    Console(width=10000).print(t)
 
 
 @agents_app.command("create")
@@ -334,21 +334,28 @@ def tests_list(
         params["agent"] = agent_id
     data = client.get("/api/v1/test-runs/", **params)
     results = data.get("results", data) if isinstance(data, dict) else data
-    t = Table("ID", "Agent", "Scenario", "Mode", "Status", "Passed")
-    t.columns[0].min_width = 36
-    t.columns[1].min_width = 36
-    t.columns[2].min_width = 36
+    t = Table("ID", "Scenario", "Mode", "Status", "Pass", "Scores")
+    t.columns[0].no_wrap = True
+    judging_pending = 0
     for r in results:
-        passed = str(r.get("result", {}).get("passed", "—")) if r.get("result") else "—"
-        t.add_row(
-            r["id"],
-            str(r.get("agent", "")),
-            r.get("scenario", ""),
-            r.get("mode", ""),
-            r.get("status", ""),
-            passed,
-        )
-    console.print(t)
+        scenario = r.get("scenario_name") or r.get("scenario", "")
+        result = r.get("result")
+        if result:
+            passed = "[green]✓[/green]" if result.get("passed") else "[red]✗[/red]"
+            scores = result.get("scores", [])
+            if scores:
+                n_pass = sum(1 for s in scores if s.get("passed"))
+                scores_str = f"{n_pass}/{len(scores)}"
+            else:
+                scores_str = "[yellow]judging…[/yellow]"
+                judging_pending += 1
+        else:
+            passed = "—"
+            scores_str = "—"
+        t.add_row(r["id"], scenario, r.get("mode", ""), r.get("status", ""), passed, scores_str)
+    Console(width=10000).print(t)
+    if judging_pending:
+        console.print(f"[yellow]{judging_pending} completed run(s) awaiting judge scores[/yellow]")
 
 
 @tests_app.command("show")
@@ -444,8 +451,8 @@ def calls_list(
     data = client.get("/api/v1/calls/", **params)
     results = data.get("results", data) if isinstance(data, dict) else data
     t = Table("ID", "Agent", "Source", "Status", "Started")
-    t.columns[0].min_width = 36
-    t.columns[1].min_width = 36
+    t.columns[0].no_wrap = True
+    t.columns[1].no_wrap = True
     for c in results:
         t.add_row(
             c["id"],
@@ -454,7 +461,7 @@ def calls_list(
             c.get("status", ""),
             (c.get("started_at") or "")[:16],
         )
-    console.print(t)
+    Console(width=10000).print(t)
 
 
 @calls_app.command("transcript")

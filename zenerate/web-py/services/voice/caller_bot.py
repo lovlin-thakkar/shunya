@@ -21,6 +21,7 @@ so consecutive turns can be diffed to derive real pipeline latency.
 """
 import array
 import asyncio
+import collections
 import io
 import logging
 import os
@@ -50,6 +51,9 @@ MIN_AUDIO_DURATION = 0.3
 SILENCE_RMS_THRESHOLD = 20
 # 16 kHz mono 16-bit: 1 second = 32 000 bytes
 BYTES_PER_SEC = 32_000
+# Pre-roll: capture this many 20ms frames before speech crosses threshold,
+# so the very first syllable of each agent turn is never lost.
+PREROLL_FRAMES = 15  # 15 × 20ms = 300ms look-back window
 
 
 @dataclass
@@ -85,12 +89,13 @@ class ScenarioCallerBot:
         self._transcript: list[Turn] = []
         # For transcription logic only (non-silent agent audio chunks)
         self._agent_audio_buf: list[bytes] = []
+        # Rolling look-back of recent frames prepended when speech is detected
+        self._preroll: collections.deque[bytes] = collections.deque(maxlen=PREROLL_FRAMES)
         self._last_audio_ts: float = 0.0
         self._agent_speaking = False
         self._speech_start_ts: float = 0.0
         self._call_client = None
         self._mic = None
-        self._speaker = None
         self._joined = asyncio.Event()
         self._agent_participant_id: str | None = None
         # Real-time capture — timestamped audio chunks from both sides
@@ -126,6 +131,20 @@ class ScenarioCallerBot:
                 if pid and pid != caller_bot._local_participant_id:
                     logger.info(f"Agent participant joined: {pid}")
                     caller_bot._agent_participant_id = pid
+                    # Register audio callback so we receive the agent's TTS output.
+                    # VirtualSpeakerDevice.read_frames() returns empty in 0.30.0 without
+                    # explicit subscriptions; set_audio_renderer is the reliable path.
+                    try:
+                        caller_bot._call_client.set_audio_renderer(
+                            pid,
+                            caller_bot._on_agent_audio,
+                            audio_source="microphone",
+                            sample_rate=16000,
+                            callback_interval_ms=20,
+                        )
+                        logger.info(f"Registered audio renderer for agent {pid}")
+                    except Exception as e:
+                        logger.error(f"Failed to register audio renderer: {e}")
 
             def on_participant_left(self, participant, reason):
                 logger.info(f"Participant left: {participant.get('id', '')} reason={reason}")
@@ -138,14 +157,9 @@ class ScenarioCallerBot:
         # without freezing it; daily devices are thread-affine, so we must NOT
         # write from a worker thread (that silently injected nothing).
         mic_name = f"caller-mic-{self._device_id}"
-        spk_name = f"caller-spk-{self._device_id}"
         self._mic = Daily.create_microphone_device(
             mic_name, sample_rate=16000, channels=1, non_blocking=True
         )
-        self._speaker = Daily.create_speaker_device(
-            spk_name, sample_rate=16000, channels=1
-        )
-        Daily.select_speaker_device(spk_name)
 
         self._call_client = CallClient(event_handler=Handler())
         self._local_participant_id: str | None = None
@@ -167,20 +181,19 @@ class ScenarioCallerBot:
         # Record exact call-start time after join so all offsets are from this point
         self._call_start_ts = time.monotonic()
 
-        # Give the agent pipeline a moment to be ready
-        await asyncio.sleep(2)
+        # Wait for the agent's opening greeting (if any) before sending step 1.
+        # Poll up to GREETING_WAIT_SECS for agent audio to start, then finish.
+        greeting_text = await self._wait_for_greeting()
+        if greeting_text:
+            agent_ts_ms = int((self._speech_start_ts - self._call_start_ts) * 1000)
+            self._transcript.append(Turn("agent", greeting_text, agent_ts_ms))
+            logger.info("Agent greeting captured: %s", greeting_text[:60])
 
-        # Start background task polling speaker device for agent audio
-        speaker_task = asyncio.create_task(self._poll_speaker())
-
+        # Agent audio arrives via _on_agent_audio() callback (set_audio_renderer)
+        # registered in on_participant_joined — no polling task needed.
         try:
             await self._speak_loop()
         finally:
-            speaker_task.cancel()
-            try:
-                await speaker_task
-            except asyncio.CancelledError:
-                pass
             self._call_client.leave()
             self._write_recording()
 
@@ -239,56 +252,61 @@ class ScenarioCallerBot:
         except OSError as e:
             logger.error(f"Failed to write recording: {e}")
 
-    async def _poll_speaker(self):
+    def _on_agent_audio(self, participant_id: str, audio_data, audio_source: str = "microphone") -> None:
         """
-        Poll VirtualSpeakerDevice for agent audio.
+        Called from the Daily SDK thread (not the asyncio event loop) when the
+        agent sends audio. Replaces the VirtualSpeakerDevice polling approach
+        which returns empty bytes in daily-python 0.30.0 without explicit
+        subscriptions.
 
-        ALL frames — including silent ones — are timestamped and stored in
-        _agent_frames. This gives exact real-time fidelity: the WAV will contain
-        silence wherever the Daily room was quiet (agent processing, network jitter,
-        etc.) without any post-hoc guessing.
+        Only non-silent frames are stored in _agent_audio_buf (for STT). ALL
+        frames including silence are stored in _agent_frames for the WAV recording
+        so gap timing is accurate.
         """
-        # 20ms chunks at 16kHz mono = 320 frames
-        frames_per_chunk = 320
-        while True:
-            try:
-                audio_data = self._speaker.read_frames(frames_per_chunk)
-            except (RuntimeError, AttributeError):
-                await asyncio.sleep(0.02)
-                continue
+        raw = bytes(audio_data.audio_frames) if hasattr(audio_data, "audio_frames") else bytes(audio_data)
+        if not raw or len(raw) < 2:
+            return
 
-            if not audio_data:
-                await asyncio.sleep(0.02)
-                continue
+        # Thread-safe: list.append is atomic under the GIL
+        if self._call_start_ts:
+            offset = time.monotonic() - self._call_start_ts
+            self._agent_frames.append((offset, raw))
 
-            if isinstance(audio_data, str):
-                audio_data = audio_data.encode("latin-1")
-            elif not isinstance(audio_data, (bytes, bytearray)):
-                audio_data = bytes(audio_data)
+        n = len(raw) // 2
+        samples = struct.unpack_from(f"<{n}h", raw[: n * 2])
+        rms = (sum(s * s for s in samples) / n) ** 0.5
 
-            if len(audio_data) < 2:
-                await asyncio.sleep(0.01)
-                continue
+        if rms > SILENCE_RMS_THRESHOLD:
+            self._last_audio_ts = time.monotonic()
+            if not self._agent_speaking:
+                self._agent_speaking = True
+                self._speech_start_ts = time.monotonic()
+                # Prepend the pre-roll so the onset syllable is not lost
+                self._agent_audio_buf.extend(self._preroll)
+                self._preroll.clear()
+        else:
+            # Keep silent frames in the look-back window; discard once speech starts
+            if not self._agent_speaking:
+                self._preroll.append(raw)
 
-            # Timestamp at arrival — this is the true position in the call timeline
-            if self._call_start_ts:
-                offset = time.monotonic() - self._call_start_ts
-                self._agent_frames.append((offset, bytes(audio_data)))
+        if self._agent_speaking:
+            self._agent_audio_buf.append(raw)
 
-            # VAD — only for transcription logic, not for recording
-            samples = struct.unpack_from(f"<{len(audio_data) // 2}h", audio_data)
-            rms = (sum(s * s for s in samples) / max(len(samples), 1)) ** 0.5
-
-            if rms > SILENCE_RMS_THRESHOLD:
-                self._last_audio_ts = time.monotonic()
-                if not self._agent_speaking:
-                    self._agent_speaking = True
-                    self._speech_start_ts = time.monotonic()
-
+    async def _wait_for_greeting(self) -> str:
+        """Wait up to 8s for the agent to start speaking, then collect the full
+        greeting. Returns empty string if the agent is silent (no greeting).
+        This prevents the caller from talking over the opening greeting."""
+        GREETING_START_TIMEOUT = 8.0   # how long to wait for first audio
+        poll_start = time.monotonic()
+        while time.monotonic() - poll_start < GREETING_START_TIMEOUT:
             if self._agent_speaking:
-                self._agent_audio_buf.append(bytes(audio_data))
-
-            await asyncio.sleep(0.01)
+                text, _ = await self._collect_agent_response()
+                self._agent_audio_buf.clear()
+                self._preroll.clear()
+                self._agent_speaking = False
+                return text
+            await asyncio.sleep(0.1)
+        return ""
 
     async def _speak_loop(self):
         for step in self.steps:
@@ -301,6 +319,7 @@ class ScenarioCallerBot:
             logger.info(f"Caller speaking at +{caller_ts_ms}ms: {clean[:60]}")
 
             self._agent_audio_buf.clear()
+            self._preroll.clear()
             self._agent_speaking = False
 
             try:

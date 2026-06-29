@@ -192,10 +192,14 @@ async def _run_voice_agent_inner(
         params=PipelineParams(allow_interruptions=True),
     )
 
-    call_resp = {"call_id": None}
+    call_resp = {"call_id": None, "caller_participant_id": None}
 
     @transport.event_handler("on_first_participant_joined")
     async def on_participant_joined(transport, participant):
+        # Record the caller's participant ID so we only end the call when THEY leave.
+        # Observers or transient ghost participants leaving must not cancel the pipeline.
+        call_resp["caller_participant_id"] = participant.get("id")
+
         data = {
             "agent_id": agent_id,
             "source": "human",
@@ -212,13 +216,22 @@ async def _run_voice_agent_inner(
                 call_resp["call_id"] = r.json()["call_id"]
 
         if greeting:
-            from pipecat.frames.frames import LLMMessagesFrame
+            from pipecat.frames.frames import LLMMessagesAppendFrame
             await task.queue_frames([
-                LLMMessagesFrame([{"role": "user", "content": "[call started]"}])
+                LLMMessagesAppendFrame(
+                    messages=[{"role": "user", "content": "[call started]"}],
+                    run_llm=True,
+                )
             ])
 
     @transport.event_handler("on_participant_left")
     async def on_participant_left(transport, participant, reason):
+        pid = participant.get("id")
+        caller_pid = call_resp.get("caller_participant_id")
+        if caller_pid and pid != caller_pid:
+            # An observer or unrelated participant left — keep the pipeline alive.
+            logger.info(f"Non-caller participant {pid} left ({reason}); pipeline continues")
+            return
         if call_resp["call_id"]:
             await _notify_django(
                 f"calls/{call_resp['call_id']}/end/",
