@@ -27,6 +27,12 @@ class MultitenantContextMiddleware:
 
     def _resolve_tenant(self, request: HttpRequest) -> Tenant | None:
         # Knox token: "Authorization: Token <knox> <tenant_id>"
+        # TODO(security): the tenant is taken from the <tenant_id> the client put
+        # in the header WITHOUT verifying the Knox token actually belongs to that
+        # tenant. A user with a valid token for tenant A could set tenant B's id
+        # here and have RLS scoped to B. Validate that the Knox AuthToken's user
+        # is a member of <tenant_id> before trusting it. (API-key auth is safe —
+        # it derives the tenant from the hashed key, not from a header.)
         auth = request.headers.get("Authorization", "")
         if auth.startswith("Token "):
             parts = auth[6:].split()

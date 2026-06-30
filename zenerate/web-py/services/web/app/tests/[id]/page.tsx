@@ -51,7 +51,6 @@ export default function TestRunPage({ params }: Props) {
   const scores = result?.scores ?? [];
   const liveScores = run.live_scores?.scores ?? [];
   const liveTurn = run.live_scores?.turn;
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
   return (
     <div className="p-8 max-w-5xl">
@@ -212,7 +211,6 @@ export default function TestRunPage({ params }: Props) {
                   <Transcript
                     turns={result?.transcript ?? []}
                     audioRunId={run.mode === "audio" ? run.id : undefined}
-                    apiUrl={apiUrl}
                   />
                 </>
               )}
@@ -221,7 +219,6 @@ export default function TestRunPage({ params }: Props) {
             <Transcript
               turns={result?.transcript ?? []}
               audioRunId={run.mode === "audio" ? run.id : undefined}
-              apiUrl={apiUrl}
             />
           )}
         </div>

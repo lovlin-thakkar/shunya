@@ -43,8 +43,9 @@ class RemoteAudioCaller(CallerInterface):
         self.observer_url: str | None = None
         # Set if ElevenLabs closed the WS mid-call (e.g. agent technical issues).
         self.disconnect_reason: str = ""
-        # Rubric for the during-call judge sub-agent; the runner sets this.
+        # Rubric + persona for the during-call judge sub-agent; the runner sets these.
         self.rubric: dict = {}
+        self.persona: str = ""
         self._room_url: str = ""
         self._caller_token: str = ""
 
@@ -84,6 +85,7 @@ class RemoteAudioCaller(CallerInterface):
                 "agent_api_key": cred.api_key if cred else "",
                 "dynamic_variables": self.agent.dynamic_variables or {},
                 "steps": steps,
+                "persona": self.persona or "",
                 "recording_id": recording_id,
                 # Daily room for live observer access (empty → falls back to WS-only bot)
                 "room_url": self._room_url,

@@ -74,7 +74,7 @@ There are **three** moving parts: one control plane, one voice/caller process, a
 
 | Service          | Process / Port      | Entry point                       | Role                                                            |
 |------------------|---------------------|-----------------------------------|----------------------------------------------------------------|
-| **Django API**   | `:8000`             | `apps/api/src/zenapi/config/`     | Multi-tenant REST control plane (RLS); serves `/recordings/*.wav` |
+| **Django API**   | `:8000`             | `apps/api/src/zenapi/config/`     | Multi-tenant REST control plane (RLS); streams recordings via authenticated `test-runs/<id>/recording/` |
 | **Celery worker**| —                   | `packages/agent/.../voice_qa/tasks/` | Runs scenarios + inline scoring + metric/alert computation; NOT auto-reloaded |
 | **Caller service**| `:8002`            | `services/voice/caller_server.py` | EvalAgent (remote mode): ConvAI WS + Scorer + EvalBridge + WAV |
 | **Web UI**       | `:3000`             | `services/web/`                   | Next.js frontend for agents, scenarios, test runs               |
@@ -141,7 +141,7 @@ This is the spine of the system. Follow it once and the codebase makes sense.
 
 6.  Client polls GET /api/v1/test-runs/<id>/  (or `shunya tests run … --wait`)
         └─▶ reads back TestResult + JudgeScores + assertion_results
-        └─▶ remote runs: GET /recordings/<run-id>.wav   (shunya tests audio <run-id>)
+        └─▶ remote runs: GET /api/v1/test-runs/<run-id>/recording/  (auth + tenant-scoped; shunya tests audio <run-id>)
         └─▶ live listen-in: once status=running, --wait prints TestRun.observer_url
             (per-run ephemeral Daily room — open it to hear the call in real time)
 ```

@@ -9,15 +9,28 @@ split.
 """
 
 import os
+import sys
 from pathlib import Path
 
 # apps/api/src/zenapi/config/settings/__init__.py → apps/api/
 BASE_DIR = Path(__file__).resolve().parents[4]
 
+# True when imported under pytest. The test suite runs with the dev secrets and
+# the Django test client's "testserver" host, so it must bypass the production
+# guards and the non-wildcard ALLOWED_HOSTS below.
+_TESTING = "pytest" in sys.modules
+
 _DEV_SECRET_KEY = "dev-secret-do-not-use-in-prod"
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", _DEV_SECRET_KEY)
-DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
-ALLOWED_HOSTS = ["*"] if DEBUG else os.environ.get("ALLOWED_HOSTS", "").split(",")
+# Secure by default: DEBUG is OFF unless DJANGO_DEBUG=1 is explicitly set. Local
+# dev (docker-compose, .env.example) sets DJANGO_DEBUG=1; production leaving it
+# unset means DEBUG stays off and the dev-secret guards below are enforced.
+DEBUG = os.environ.get("DJANGO_DEBUG", "0") == "1"
+ALLOWED_HOSTS = (
+    ["*"]
+    if DEBUG or _TESTING
+    else [h.strip() for h in os.environ.get("ALLOWED_HOSTS", "").split(",") if h.strip()]
+)
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -110,6 +123,8 @@ REST_FRAMEWORK = {
     "PAGE_SIZE": 50,
 }
 
+# TODO(security): TOKEN_TTL=None means Knox tokens never expire. Set a finite TTL
+# (e.g. timedelta(hours=12)) and enable token rotation before any production use.
 REST_KNOX = {"TOKEN_TTL": None}
 
 # Shared by ServiceTokenAuthentication. Rotate per environment.
@@ -144,7 +159,7 @@ USE_TZ = True
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 STATIC_URL = "static/"
 
-if not DEBUG:
+if not DEBUG and not _TESTING:
     from django.core.exceptions import ImproperlyConfigured
     if SECRET_KEY == _DEV_SECRET_KEY:
         raise ImproperlyConfigured("DJANGO_SECRET_KEY must be set in production.")

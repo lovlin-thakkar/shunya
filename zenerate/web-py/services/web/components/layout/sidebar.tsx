@@ -2,9 +2,15 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Bot, FlaskConical, ListChecks, LogOut } from "lucide-react";
-import { API_KEY_STORAGE } from "@/lib/api";
+import { useState } from "react";
+import { Bot, FlaskConical, ListChecks, LogOut, Mic, MicOff } from "lucide-react";
+import { API_KEY_STORAGE, apiFetch } from "@/lib/api";
+import type { ElevenLabsIntegration } from "@/lib/types";
+import { ConnectElevenLabsModal } from "@/components/connect-elevenlabs-modal";
+import useSWR from "swr";
 import clsx from "clsx";
+
+const elFetcher = () => apiFetch<ElevenLabsIntegration>("/api/v1/integrations/elevenlabs/");
 
 const nav = [
   { href: "/agents",    label: "Agents",    icon: Bot },
@@ -14,6 +20,19 @@ const nav = [
 
 export function Sidebar() {
   const path = usePathname();
+  const [modalOpen, setModalOpen] = useState(false);
+
+  const { data: elData, mutate: mutateEl } = useSWR<ElevenLabsIntegration>(
+    "/api/v1/integrations/elevenlabs/",
+    elFetcher,
+    { revalidateOnFocus: false },
+  );
+  const connected = elData?.configured ?? false;
+
+  async function disconnectEl() {
+    await apiFetch("/api/v1/integrations/elevenlabs/", { method: "DELETE" });
+    mutateEl({ configured: false, key_hint: "" }, false);
+  }
 
   function signOut() {
     localStorage.removeItem(API_KEY_STORAGE);
@@ -77,7 +96,52 @@ export function Sidebar() {
       </nav>
 
       {/* Footer */}
-      <div className="px-3 pb-4" style={{ borderTop: "1px solid var(--border)", paddingTop: "12px" }}>
+      <div className="px-3 pb-4 space-y-0.5" style={{ borderTop: "1px solid var(--border)", paddingTop: "12px" }}>
+        {/* Connect / Disconnect ElevenLabs */}
+        {connected ? (
+          <button
+            onClick={disconnectEl}
+            className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm w-full text-left"
+            style={{ color: "var(--ink-3)" }}
+            onMouseEnter={(e) => {
+              const el = e.currentTarget as HTMLElement;
+              el.style.color = "var(--red)";
+              el.style.background = "var(--red-bg)";
+            }}
+            onMouseLeave={(e) => {
+              const el = e.currentTarget as HTMLElement;
+              el.style.color = "var(--ink-3)";
+              el.style.background = "transparent";
+            }}
+          >
+            <MicOff size={14} />
+            Disconnect ElevenLabs
+            {elData?.key_hint && (
+              <span className="ml-auto font-mono text-[10px]" style={{ color: "var(--ink-3)" }}>
+                {elData.key_hint}
+              </span>
+            )}
+          </button>
+        ) : (
+          <button
+            onClick={() => setModalOpen(true)}
+            className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm w-full text-left"
+            style={{ color: "var(--blue)" }}
+            onMouseEnter={(e) => {
+              const el = e.currentTarget as HTMLElement;
+              el.style.background = "var(--blue-bg)";
+            }}
+            onMouseLeave={(e) => {
+              const el = e.currentTarget as HTMLElement;
+              el.style.background = "transparent";
+            }}
+          >
+            <Mic size={14} />
+            Connect ElevenLabs
+          </button>
+        )}
+
+        {/* Sign out */}
         <button
           onClick={signOut}
           className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm w-full text-left"
@@ -97,6 +161,12 @@ export function Sidebar() {
           Change API Key
         </button>
       </div>
+
+      <ConnectElevenLabsModal
+        isOpen={modalOpen}
+        onClose={() => setModalOpen(false)}
+        onConnected={() => mutateEl()}
+      />
     </aside>
   );
 }

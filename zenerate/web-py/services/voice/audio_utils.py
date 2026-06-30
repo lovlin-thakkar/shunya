@@ -94,6 +94,9 @@ def write_mixed_wav(recording_id: str, caller_frames, agent_frames,
     total_bytes = int(total_secs * BYTES_PER_SEC) + BYTES_PER_SEC  # +1s tail
     buf = array.array("h", [0] * (total_bytes // 2))
 
+    # TODO(perf): this mixes sample-by-sample in pure Python — O(total_samples),
+    # i.e. millions of iterations for a multi-minute call. Switch to numpy
+    # (or audioop.add over slices) if recording length grows.
     for offset_secs, pcm in all_chunks:
         start_sample = int(offset_secs * 16000)
         n = len(pcm) // 2

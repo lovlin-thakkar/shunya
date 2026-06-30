@@ -41,6 +41,7 @@ services:
     env_file:
       - ./apps/api/.env
     environment:
+      DJANGO_DEBUG: "1"
       DB_HOST: db
       DB_USER: zen
       DB_PASSWORD: zen
@@ -66,6 +67,7 @@ services:
     env_file:
       - ./apps/api/.env
     environment:
+      DJANGO_DEBUG: "1"
       DB_HOST: db
       DB_USER: zen
       DB_PASSWORD: zen

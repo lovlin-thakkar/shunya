@@ -18,7 +18,7 @@ pytestmark = pytest.mark.django_db
 def test_tenant_round_trip(tenant_a):
     fetched = Tenant.objects.get(slug="tenant-a")
     assert fetched.id == tenant_a.id
-    assert fetched.service_token == "svc-a"
+    assert fetched.name == "Tenant A"
 
 
 def test_context_var_holds_tenant(tenant_a, tenant_b, in_tenant):

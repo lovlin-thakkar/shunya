@@ -19,7 +19,7 @@ zenerate/web-py/        ← the entire active codebase
 
 Shunya is a voice AI QA platform. It has two runtime services:
 
-1. **Django API** (`zenerate/web-py/apps/api/`) — control plane: multi-tenant REST API (RLS), Celery workers, post-call LLM judge, scenario runner; serves call recordings at `/recordings/<run-id>.wav`
+1. **Django API** (`zenerate/web-py/apps/api/`) — control plane: multi-tenant REST API (RLS), Celery workers, post-call LLM judge, scenario runner; streams call recordings (authenticated, tenant-scoped) at `GET /api/v1/test-runs/<run-id>/recording/`
 2. **Caller service** (`zenerate/web-py/services/voice/caller_server.py`, :8002) — drives remote ElevenLabs Conversational AI agents: `EvalAgent` (WebSocket client), `Scorer` (live per-turn scoring via Claude Sonnet), `EvalBridge` (Daily.co live listen-in); separate process because `daily-python` allows only one `CallClient`/`Daily.init()` per process
 
 Plus a CLI (`zenerate/web-py/cli/`) and a Next.js web UI (`zenerate/web-py/services/web/`).

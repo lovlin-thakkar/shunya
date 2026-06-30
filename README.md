@@ -415,8 +415,9 @@ shunya tests run <agent-id> --scenario booking_happy_path --mode audio --wait
 
 ```bash
 shunya tests transcript <run-id>     # prints recording link for audio runs
-shunya tests audio <run-id>          # prints + opens the link
-# Or open directly: http://localhost:8000/recordings/<run-id>.wav
+shunya tests audio <run-id>          # downloads (authenticated) + opens the recording
+# Recordings stream from the authenticated, tenant-scoped endpoint:
+#   GET /api/v1/test-runs/<run-id>/recording/   (Authorization: Api-Key <key>)
 ```
 
 ### Caller service endpoints (:8002)
@@ -525,7 +526,7 @@ Supported operators: `gt`, `lt`, `gte`, `lte`, `eq`
 | Code change in `runner.py`/`judge.py`/tasks has no effect | `celery_worker` container doesn't auto-reload | `docker compose restart celery_worker` |
 | `caller` container crashes / native panic | `daily-python` on Python 3.14 or ARM64 | Container pinned to `python:3.12` + `--platform=linux/amd64` |
 | Remote run: 403 on TTS | `voice_id` empty | Guarded with `voice_id or DEFAULT`; set a valid voice ID |
-| `/recordings/<id>.wav` 404 | No recording (text mode) | Recordings only exist for remote mode runs |
+| `GET /api/v1/test-runs/<id>/recording/` 404 | No recording (text mode) | Recordings only exist for remote/audio mode runs |
 | Second concurrent remote run's audio bleeds into the first run's Daily room | Two `CallClient` instances in one process — `daily-python` only allows one | By design: second run automatically runs WS-only (no Daily relay). First room is unaffected. Check caller logs for "Another run is already using the Daily audio relay". |
 | ElevenLabs "Audio duration mismatch" warning in transcript player | Gap in `user_audio_chunk` stream during agent response window | Expected: we intentionally stop sending silence during agent speech to prevent transcript overlap. The warning is cosmetic — WAV recording is the authoritative record. |
 | ElevenLabs transcript player shows caller + agent voices overlapping | Old keepalive code was sending silence during agent response | Fixed: keepalive now only runs during scoring + TTS synthesis gaps. Restart `caller` service to pick up changes. |

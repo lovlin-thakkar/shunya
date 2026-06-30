@@ -7,6 +7,8 @@ Two auth paths:
 
 from __future__ import annotations
 
+import hmac
+
 from django.conf import settings
 from rest_framework import authentication, exceptions, permissions
 
@@ -62,7 +64,13 @@ class ServiceTokenAuthentication(authentication.BaseAuthentication):
         if not token or not tenant_id:
             return None
 
-        if token != settings.SERVICE_TOKEN:
+        # TODO(security): this is a single global SERVICE_TOKEN and the caller
+        # picks the tenant via the X-Tenant-Id header. If the token leaks, it
+        # grants access to ANY tenant (scoped only by a client-supplied header).
+        # Internal views re-check resource.tenant_id vs the header as a backstop,
+        # but the real fix is per-service tokens or signing the tenant id into the
+        # token. (Note: Tenant.service_token was unused dead code and was removed.)
+        if not hmac.compare_digest(token, settings.SERVICE_TOKEN):
             raise exceptions.AuthenticationFailed("Invalid service token.")
 
         try:

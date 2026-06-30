@@ -31,9 +31,11 @@ def run_scenario(test_run_id: str):
         # Keying off the capability lets ElevenLabs agents take the remote path
         # regardless of the run's mode field.
         if hasattr(caller, "run_scenario"):
-            # Give the during-call judge sub-agent the scenario's rubric.
+            # Give the during-call judge sub-agent the scenario's rubric + persona.
             if hasattr(caller, "rubric"):
                 caller.rubric = run.scenario.rubric
+            if hasattr(caller, "persona"):
+                caller.persona = run.scenario.persona
             caller._connect()
             if caller.observer_url:
                 run.observer_url = caller.observer_url
@@ -135,7 +137,7 @@ def _promote_live_scores(run: TestRun, test_result: TestResult) -> bool:
         ))
 
     if not judge_scores:
-        return
+        return False
 
     JudgeScore.objects.bulk_create(judge_scores, ignore_conflicts=True)
 
