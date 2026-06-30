@@ -19,6 +19,7 @@ Recording approach — true real-time capture, not reconstruction:
 All ts_ms values in the transcript are milliseconds from call start (joined event),
 so consecutive turns can be diffed to derive real pipeline latency.
 """
+
 import array
 import asyncio
 import collections
@@ -43,6 +44,7 @@ ELEVENLABS_API_URL = "https://api.elevenlabs.io/v1"
 class ElevenLabsQuotaError(Exception):
     """Raised when ElevenLabs API credits are exhausted — fail the run immediately."""
 
+
 RESPONSE_TIMEOUT = 30
 # After agent starts speaking, collect this many seconds before transcribing
 AGENT_COLLECT_WINDOW = 10.0
@@ -58,9 +60,9 @@ PREROLL_FRAMES = 15  # 15 × 20ms = 300ms look-back window
 
 @dataclass
 class Turn:
-    speaker: str   # "caller" | "agent"
+    speaker: str  # "caller" | "agent"
     text: str
-    ts_ms: int = 0       # ms from call-joined to when this turn STARTED speaking
+    ts_ms: int = 0  # ms from call-joined to when this turn STARTED speaking
     quirks: list = field(default_factory=list)
 
 
@@ -85,12 +87,16 @@ class ScenarioCallerBot:
         self.voice_id = voice_id or DEFAULT_VOICE_ID
         self.recording_id = recording_id
         self._el_key = elevenlabs_api_key or os.environ["ELEVENLABS_API_KEY"]
-        self._device_id = uuid.uuid4().hex[:8]  # unique per call so devices don't collide
+        self._device_id = uuid.uuid4().hex[
+            :8
+        ]  # unique per call so devices don't collide
         self._transcript: list[Turn] = []
         # For transcription logic only (non-silent agent audio chunks)
         self._agent_audio_buf: list[bytes] = []
         # Rolling look-back of recent frames prepended when speech is detected
-        self._preroll: collections.deque[bytes] = collections.deque(maxlen=PREROLL_FRAMES)
+        self._preroll: collections.deque[bytes] = collections.deque(
+            maxlen=PREROLL_FRAMES
+        )
         self._last_audio_ts: float = 0.0
         self._agent_speaking = False
         self._speech_start_ts: float = 0.0
@@ -116,12 +122,14 @@ class ScenarioCallerBot:
                 if state == "joined":
                     try:
                         participants = caller_bot._call_client.participants()
-                        caller_bot._local_participant_id = (
-                            participants.get("local", {}).get("id")
-                        )
+                        caller_bot._local_participant_id = participants.get(
+                            "local", {}
+                        ).get("id")
                     except (RuntimeError, AttributeError, KeyError):
                         caller_bot._local_participant_id = None
-                    logger.info(f"Caller bot joined room (local={caller_bot._local_participant_id})")
+                    logger.info(
+                        f"Caller bot joined room (local={caller_bot._local_participant_id})"
+                    )
                     caller_bot._joined.set()
                 elif state in ("left", "error"):
                     logger.info(f"Caller bot call state: {state}")
@@ -147,12 +155,15 @@ class ScenarioCallerBot:
                         logger.error(f"Failed to register audio renderer: {e}")
 
             def on_participant_left(self, participant, reason):
-                logger.info(f"Participant left: {participant.get('id', '')} reason={reason}")
+                logger.info(
+                    f"Participant left: {participant.get('id', '')} reason={reason}"
+                )
 
             def on_error(self, message):
                 logger.error(f"Daily call error: {message}")
 
         from daily import Daily
+
         # non_blocking so write_frames can be called from the event-loop thread
         # without freezing it; daily devices are thread-affine, so we must NOT
         # write from a worker thread (that silently injected nothing).
@@ -228,7 +239,7 @@ class ScenarioCallerBot:
             start_sample = int(offset_secs * 16000)
             # Normalize to int16 array
             n = len(pcm) // 2
-            chunk = array.array("h", pcm[:n * 2])
+            chunk = array.array("h", pcm[: n * 2])
             for i, s in enumerate(chunk):
                 idx = start_sample + i
                 if idx >= len(buf):
@@ -247,12 +258,17 @@ class ScenarioCallerBot:
             self.recording_file = f"{self.recording_id}.wav"
             logger.info(
                 "Wrote recording %s (%.1fs, %d caller chunks, %d agent chunks)",
-                path, total_secs, len(self._caller_frames), len(self._agent_frames),
+                path,
+                total_secs,
+                len(self._caller_frames),
+                len(self._agent_frames),
             )
         except OSError as e:
             logger.error(f"Failed to write recording: {e}")
 
-    def _on_agent_audio(self, participant_id: str, audio_data, audio_source: str = "microphone") -> None:
+    def _on_agent_audio(
+        self, participant_id: str, audio_data, audio_source: str = "microphone"
+    ) -> None:
         """
         Called from the Daily SDK thread (not the asyncio event loop) when the
         agent sends audio. Replaces the VirtualSpeakerDevice polling approach
@@ -263,7 +279,11 @@ class ScenarioCallerBot:
         frames including silence are stored in _agent_frames for the WAV recording
         so gap timing is accurate.
         """
-        raw = bytes(audio_data.audio_frames) if hasattr(audio_data, "audio_frames") else bytes(audio_data)
+        raw = (
+            bytes(audio_data.audio_frames)
+            if hasattr(audio_data, "audio_frames")
+            else bytes(audio_data)
+        )
         if not raw or len(raw) < 2:
             return
 
@@ -296,7 +316,7 @@ class ScenarioCallerBot:
         """Wait up to 8s for the agent to start speaking, then collect the full
         greeting. Returns empty string if the agent is silent (no greeting).
         This prevents the caller from talking over the opening greeting."""
-        GREETING_START_TIMEOUT = 8.0   # how long to wait for first audio
+        GREETING_START_TIMEOUT = 8.0  # how long to wait for first audio
         poll_start = time.monotonic()
         while time.monotonic() - poll_start < GREETING_START_TIMEOUT:
             if self._agent_speaking:
@@ -325,7 +345,9 @@ class ScenarioCallerBot:
             try:
                 audio_bytes = await self._synthesize_tts(clean)
             except ElevenLabsQuotaError:
-                logger.error("ElevenLabs quota exhausted — aborting scenario immediately")
+                logger.error(
+                    "ElevenLabs quota exhausted — aborting scenario immediately"
+                )
                 raise
             if audio_bytes:
                 # Timestamp BEFORE send so offset reflects when audio starts playing
@@ -343,12 +365,20 @@ class ScenarioCallerBot:
                 self._transcript.append(Turn("agent", agent_text, agent_ts_ms))
                 logger.info(
                     "Agent responded at +%dms (pipeline latency %dms)",
-                    agent_ts_ms, latency_ms,
+                    agent_ts_ms,
+                    latency_ms,
                 )
 
     async def _collect_agent_response(self) -> tuple[str, int]:
         """Returns (transcript_text, pipeline_latency_ms).
         pipeline_latency_ms = time from caller done speaking to agent first audio."""
+        # Clear at the last moment so stale callbacks from the previous turn
+        # (framed by the Daily SDK thread after _speak_loop cleared them) are
+        # not picked up as a response to the current step.
+        self._agent_speaking = False
+        self._agent_audio_buf.clear()
+        self._preroll.clear()
+
         deadline = time.monotonic() + RESPONSE_TIMEOUT
 
         # Wait for agent to start speaking
@@ -363,7 +393,8 @@ class ScenarioCallerBot:
         latency_ms = int((self._speech_start_ts - self._caller_done_ts) * 1000)
         logger.info(
             "Agent started speaking — pipeline latency %dms, collecting for up to %.1fs",
-            latency_ms, AGENT_COLLECT_WINDOW,
+            latency_ms,
+            AGENT_COLLECT_WINDOW,
         )
 
         # Collect for a fixed window after speech starts, then check for silence
@@ -382,7 +413,10 @@ class ScenarioCallerBot:
         raw_pcm = b"".join(self._agent_audio_buf)
         self._agent_audio_buf.clear()
         self._agent_speaking = False
-        logger.info("Collected %.2fs of agent audio — transcribing", len(raw_pcm) / BYTES_PER_SEC)
+        logger.info(
+            "Collected %.2fs of agent audio — transcribing",
+            len(raw_pcm) / BYTES_PER_SEC,
+        )
         text = await self._transcribe_scribe(raw_pcm)
         return text, latency_ms
 
@@ -404,8 +438,13 @@ class ScenarioCallerBot:
                 if r.status_code == 401:
                     try:
                         detail = r.json().get("detail", {})
-                        if isinstance(detail, dict) and detail.get("code") == "quota_exceeded":
-                            raise ElevenLabsQuotaError(detail.get("message", "ElevenLabs quota exhausted"))
+                        if (
+                            isinstance(detail, dict)
+                            and detail.get("code") == "quota_exceeded"
+                        ):
+                            raise ElevenLabsQuotaError(
+                                detail.get("message", "ElevenLabs quota exhausted")
+                            )
                     except (ValueError, AttributeError):
                         pass
                 r.raise_for_status()
@@ -440,8 +479,13 @@ class ScenarioCallerBot:
                 if r.status_code == 401:
                     try:
                         detail = r.json().get("detail", {})
-                        if isinstance(detail, dict) and detail.get("code") == "quota_exceeded":
-                            raise ElevenLabsQuotaError(detail.get("message", "ElevenLabs quota exhausted"))
+                        if (
+                            isinstance(detail, dict)
+                            and detail.get("code") == "quota_exceeded"
+                        ):
+                            raise ElevenLabsQuotaError(
+                                detail.get("message", "ElevenLabs quota exhausted")
+                            )
                     except (ValueError, AttributeError):
                         pass
                 r.raise_for_status()

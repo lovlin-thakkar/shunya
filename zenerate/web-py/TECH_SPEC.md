@@ -1,52 +1,56 @@
 # TECH_SPEC — Shunya
 
-> **Status: as-built.** This spec reflects what shipped. The original decision tables (T1–T7) are kept for history; the LOCKED section and everything below match the running system. Key build-time changes vs the original PLAN: STT = ElevenLabs Scribe v2 (not Deepgram), agent LLM = Claude Haiku 4.5 (not GPT-4o), the synthetic caller is a **separate service**, and the whole stack is **Docker-first** (Daily SDK needs Python 3.12). See PLAN.md "Amendments During Build".
+> **Status: as-built.** This spec reflects what shipped. The original decision tables (T1–T7) are kept for history; the LOCKED section and everything below match the running system. Key build-time changes vs the original PLAN: STT = ElevenLabs Scribe v2 (not Deepgram), agent LLM = Claude Haiku 4.5 (not GPT-4o), the synthetic caller is a **separate service**, the whole stack is **Docker-first** (Daily SDK needs Python 3.12), and multi-tenancy uses **RLS single-schema** (not django-tenants).
 
 ---
 
 ## System Components (as-built)
 
 ```
-┌──────────────────┐     ┌─────────────────────────┐
-│   CLI (Typer)    │     │  Browser (Daily.co SDK)  │
-└────────┬─────────┘     └────────────┬────────────┘
-         │ HTTP + Api-Key             │ WebRTC
-         ▼                            ▼
+┌──────────────────┐     ┌─────────────────────────┐     ┌──────────────────┐
+│   CLI (Typer)    │     │  Browser (Daily.co SDK)  │     │  Next.js UI      │
+└────────┬─────────┘     └────────────┬────────────┘     └────────┬─────────┘
+         │ HTTP + Api-Key             │ WebRTC                   │ Knox auth
+         ▼                            ▼                          ▼
 ┌─────────────────────────┐   ┌──────────────────────────┐
 │   Django API (:8000)    │   │   Pipecat agent (:8001)   │
-│ (DRF + django-tenants)  │◄─▶│        (FastAPI)          │
+│ (DRF + RLS multi-tenant)│◄─▶│        (FastAPI)          │
 │                         │   │ Daily → Scribe v2 STT     │
-│ /api/agents/{id}/chat/  │   │  → Claude Haiku → 11Labs  │
-│ /api/agents/{id}/connect│   └─────────────┬─────────────┘
-│ /api/test-runs/         │     /caller/run │ (HTTP)
-│ /api/metrics,/alerts/   │                 ▼
-│ /recordings/<run>.wav   │   ┌──────────────────────────┐
-└──────────┬──────────────┘   │   Caller bot (:8002)      │
+│ /api/v1/agents/         │   │  → Claude Haiku → 11Labs  │
+│ /api/v1/test-runs/      │   └─────────────┬─────────────┘
+│ /api/v1/agents/{id}/sync-elevenlabs/│    │
+│ /recordings/<run>.wav   │     /caller/run │ (HTTP)
+└──────────┬──────────────┘                 ▼
+           │                  ┌──────────────────────────┐
+           │                  │   Caller bot (:8002)      │
            │                  │      (FastAPI)            │
-           │                  │ ScenarioCallerBot joins   │
-           │                  │ Daily room: TTS in (mic), │
-           │                  │ Scribe v2 on agent audio  │
-           │                  │ → writes /recordings/*.wav│
-  ┌────────┴────────┐         └──────────────┬────────────┘
-  │   PostgreSQL    │   ┌──────────────┐      │ WebRTC
-  │ (schema/tenant) │   │    Redis     │      ▼ (Daily room)
-  └─────────────────┘   │(Celery broker)│  [agent bot ↔ caller bot]
-                        └──────┬───────┘
-                               │
-                     ┌─────────▼──────────┐
-                     │   Celery Workers   │
-                     │  TextCaller runner │
-                     │  AudioCaller runner│
-                     │  LLM judge         │
-                     │  metrics + alerts  │
-                     └────────────────────┘
+           │                  │ ScenarioCallerBot:        │
+           │                  │  TTS in (mic), Scribe v2  │
+           │                  │  on agent audio, WAV out  │
+           │                  │ EvalAgent (remote EL):    │
+           │                  │  ConvAI WS + sub-agents   │
+   ┌───────┴────────┐        └──────────────┬────────────┘
+   │   PostgreSQL    │   ┌──────────────┐      │ WebRTC / WS
+   │ (single-schema  │   │    Redis     │      ├── Daily room (audio)
+   │  RLS isolation) │   │(Celery broker)│     └── ElevenLabs ConvAI WS
+   └─────────────────┘   └──────┬───────┘
+                                │
+                      ┌─────────▼──────────┐
+                      │   Celery Workers   │
+                      │  TextCaller runner │
+                      │  AudioCaller runner│
+                      │  RemoteAudioCaller │
+                      │  LLM judge         │
+                      │  metrics + alerts  │
+                      └────────────────────┘
 
-External APIs: Claude Haiku 4.5 (agent brain), Claude Sonnet 4.6 (LLM judge),
-               ElevenLabs (TTS + Scribe v2 STT), Daily.co (WebRTC transport)
+External APIs: Claude Haiku 4.5 (agent brain + live scorer), Claude Sonnet 4.6 (LLM judge),
+               ElevenLabs (TTS + Scribe v2 STT + ConvAI WS), Daily.co (WebRTC transport)
 
 Deployment: docker-compose — postgres, redis, django, celery_worker,
-            pipecat (:8001, py3.12/amd64), caller (:8002, py3.12/amd64).
-            ./recordings is bind-mounted into caller (writes) and django (serves).
+             pipecat (:8001, py3.12/amd64), caller (:8002, py3.12/amd64),
+             web (:3000, Next.js).
+             ./recordings is bind-mounted into caller (writes) and django (serves).
 ```
 
 ---
@@ -154,13 +158,15 @@ Deployment: docker-compose — postgres, redis, django, celery_worker,
 
 | Decision | Choice | Notes |
 |---|---|---|
-| T1 — Pipecat deployment | **FastAPI** (separate service) → **now two services** | Django = control plane. Voice runtime split into **pipecat (:8001, agent pipeline)** and **caller (:8002, synthetic caller bot)** because `daily-python` allows only one `CallClient` per process. Both are py3.12/amd64 containers. |
+| T1 — Pipecat deployment | **FastAPI** (separate service) → **now two services** | Django = control plane. Voice runtime split into **pipecat (:8001, agent pipeline)** and **caller (:8002, synthetic caller bot + EvalAgent)** because `daily-python` allows only one `CallClient` per process. Both are py3.12/amd64 containers. |
 | T2 — Pipecat ↔ Django IPC | **A — REST API** | Pipecat GETs agent config on call start; POSTs call events to Django internal endpoints. |
 | T3 — Transcript storage | **C — Separate `Transcript` model** | 1:1 with Call. Turns stored as JSONB array `[{speaker, text, ts_ms, quirks}]`. Keeps Call table lean; full transcript in one fetch. |
 | T4 — Celery task granularity | **C — One task per run, runs grouped** | Sequential steps within a scenario; parallel across scenarios via Celery `group()`. Idiomatic Celery. |
 | T5 — Scenario storage | **A — YAML files → DB** | YAML files in `scenarios/` dir; `manage.py load_scenarios` imports them. Git-versioned, diffable. |
 | T6 — Daily.co room lifecycle | **B — Ephemeral room per call** | New room on call start (human or AudioCaller bot), deleted after. Matches ElevenLabs pattern. |
-| T7 — CLI auth | **C — Per-tenant API key** | Key scoped to tenant, stored in DB (hashed). Set via `SHUNYA_API_KEY` env var. |
+| T7 — CLI auth | **C — Per-tenant API key** | Key scoped to tenant, stored in DB (SHA-256 hashed). Set via `SHUNYA_API_KEY` env var. |
+| T8 — Multi-tenancy | **RLS single-schema** | Custom `zenlib-mt-py` package, NOT `django-tenants`. All data in one schema, isolated by Postgres RLS on `tenant_id`. |
+| T9 — Celery task arg | **`tenant_id` (integer PK)** | Not `schema_name` — workers call `context.current_tenant.set()` to set RLS context. |
 
 ---
 
@@ -168,19 +174,21 @@ Deployment: docker-compose — postgres, redis, django, celery_worker,
 
 # DATA MODELS
 
-All models below live in the **per-tenant Postgres schema** (django-tenants) unless marked `[public]`.
+All models below inherit `ActivityTenantBaseModel` (which adds `tenant` FK + RLS) unless marked.
+All live in the **single Postgres schema**, isolated by RLS on `tenant_id`.
 
 ---
 
-## Tenants [public schema]
+## Tenants
 
 ```python
-# django-tenants built-ins
-Tenant:         schema_name, name, created_on
-Domain:         domain, tenant (FK), is_primary
+# zenlib-mt-py (packages/mt/)
 
-TenantAPIKey:   id (UUID), key_hash (str), key_prefix (str, first 8 chars for display),
-                tenant (FK → Tenant), created_at, last_used_at
+Tenant:                    id (int PK), name, slug, service_token, created_at
+                           # NOT schema_name — RLS single-schema model
+
+TenantAPIKey:              id (UUID PK), key_hash (str, SHA-256), key_prefix (str, first 8 chars),
+                           tenant (FK → Tenant), created_at, last_used_at
 ```
 
 ---
@@ -189,41 +197,47 @@ TenantAPIKey:   id (UUID), key_hash (str), key_prefix (str, first 8 chars for di
 
 ```python
 Agent:
-  id            UUID, primary key
-  name          str
-  system_prompt text
-  voice_id      str              # ElevenLabs voice ID
-  status        enum [active, inactive]
-  created_at    datetime
-  updated_at    datetime
+  id                UUID PK
+  name              str
+  description       str (blank)
+  system_prompt     text
+  greeting          text (blank)          # agent's opening line
+  voice_id          str (blank)           # ElevenLabs voice ID
+  status            enum [active, inactive]
+  target_type       enum [builtin, elevenlabs]  # BUILTIN = Pipecat pipeline, ELEVENLABS = remote
+  el_agent_id       str (blank)           # ElevenLabs ConvAI agent_id (for remote mode)
+  dynamic_variables JSONB (default {})    # injected into ConvAI conversation_initiation_client_data
+  created_at        datetime
+  updated_at        datetime
+
+ElevenLabsCredential:
+  id                UUID PK
+  api_key           text                  # write-only; never returned via API
+  key_hint          str                   # masked preview (e.g. "sk_0…a1b2")
+  tenant            FK (unique)           # one key per tenant
 
 Call:
-  id              UUID, primary key
-  agent           FK → Agent
-  source          enum [human, test_text, test_audio]
-  daily_room_url  str (nullable)   # set for human + audio fidelity calls
-  daily_room_name str (nullable)
-  status          enum [in_progress, completed, failed]
-  started_at      datetime
-  ended_at        datetime (nullable)
-  created_at      datetime
+  id                UUID PK
+  agent             FK → Agent
+  source            enum [human, test_text, test_audio]
+  daily_room_url    URLField (blank)
+  daily_room_name   str (blank)
+  status            enum [in_progress, completed, failed]
+  started_at        datetime (nullable)
+  ended_at          datetime (nullable)
+  created_at        datetime
 
 Transcript:                      # 1:1 with Call
-  id        UUID, primary key
-  call      OneToOneField → Call
-  turns     JSONB                # [{speaker: "agent"|"caller", text, ts_ms, quirks: [str]}]
-  created_at datetime
+  id                UUID PK
+  call              OneToOneField → Call
+  turns             JSONB         # [{speaker: "agent"|"caller", text, ts_ms, quirks: [str]}]
+  created_at        datetime
 
-CallMetric:                      # 1:1 with Call, written post-call
-  id                       UUID, primary key
-  call                     OneToOneField → Call
-  total_duration_ms        int
-  turn_count               int
-  first_response_latency_ms  int
-  avg_turn_latency_ms      float
-  interruption_count       int
-  sentiment                enum [positive, neutral, negative]
-  created_at               datetime
+CallMetric:                      # row per metric name per call
+  id                UUID PK
+  call              FK → Call
+  name              str           # total_duration_ms, turn_count, first_response_latency_ms, etc.
+  value             float
 ```
 
 ---
@@ -232,48 +246,52 @@ CallMetric:                      # 1:1 with Call, written post-call
 
 ```python
 Scenario:
-  id            UUID, primary key
-  name          str (unique per tenant)
-  description   str
-  yaml_content  text             # raw source YAML
-  persona       text
-  steps         JSONB            # [{text, quirks: [str]}] — parsed from YAML
-  assertions    JSONB            # [str]
-  rubric        JSONB            # {field: weight} — overrides default rubric
-  created_at    datetime
-  updated_at    datetime
+  id                UUID PK
+  name              str (unique per tenant)
+  description       str
+  yaml_content      text          # raw source YAML
+  persona           text
+  steps             JSONB         # [{text, raw, quirks: [{tag, value}]}]
+  assertions        JSONB         # [str]
+  rubric            JSONB         # {field: weight}
+  compatible_agents M2M → Agent   # empty = compatible with any agent
+  created_at        datetime
+  updated_at        datetime
 
 TestRun:
-  id              UUID, primary key
-  agent           FK → Agent
-  scenario        FK → Scenario
-  mode            enum [text, audio]   # text = TextCaller; audio = AudioCaller bot-to-bot
-  status          enum [queued, running, completed, failed]
-  celery_task_id  str (nullable)
-  call            FK → Call (nullable) # set for audio mode — the bot-to-bot call record
-  observer_url    URLField (blank)     # audio mode — pre-authed Daily join link for live listen-in
-  started_at      datetime (nullable)
-  completed_at    datetime (nullable)
-  created_at      datetime
+  id                UUID PK
+  agent             FK → Agent
+  scenario          FK → Scenario
+  mode              enum [text, audio]
+  status            enum [queued, running, completed, failed]
+  celery_task_id    str (nullable)
+  call              OneToOneField → Call (nullable)
+  observer_url      URLField (blank)     # pre-authed Daily join link for live listen-in
+  error_message     text (blank)         # failure reason if any
+  disconnect_reason str (blank)          # why ElevenLabs WS closed mid-conversation
+  live_scores       JSONB (default {})   # during-call scores from ScoringSubAgents
+  started_at        datetime (nullable)
+  completed_at      datetime (nullable)
+  created_at        datetime
 
 TestResult:                      # 1:1 with TestRun
-  id                  UUID, primary key
-  test_run            OneToOneField → TestRun
-  passed              bool
-  transcript          JSONB      # same turn format as Transcript.turns
-  assertion_results   JSONB      # [{assertion, passed: bool}]
-  created_at          datetime
+  id                UUID PK
+  test_run          OneToOneField → TestRun
+  passed            bool
+  transcript        JSONB        # same turn format as Transcript.turns
+  assertion_results JSONB        # [{assertion, passed: bool}]
+  created_at        datetime
 
 JudgeScore:                      # one row per rubric field per TestResult
-  id          UUID, primary key
-  test_result FK → TestResult
-  field       str                # instruction_following | goal_completion |
+  id                UUID PK
+  test_result       FK → TestResult
+  field             str          # instruction_following | goal_completion |
                                  # interruption_handling | tool_call_accuracy |
                                  # csat_tone | safety
-  score       float (0.0–1.0)    # NOTE: column is double precision, not integer
-  reasoning   text               # one-line Claude (Sonnet 4.6) explanation
-  passed      bool               # score >= 0.7
-  created_at  datetime
+  score             float (0.0–1.0)
+  reasoning         text         # Claude Sonnet explanation
+  passed            bool         # score >= 0.7
+  created_at        datetime
 ```
 
 ---
@@ -282,23 +300,37 @@ JudgeScore:                      # one row per rubric field per TestResult
 
 ```python
 AlertConfig:
-  id           UUID, primary key
-  agent        FK → Agent
-  metric_name  str               # avg_turn_latency_ms | interruption_count | sentiment | ...
-  operator     enum [gt, lt, gte, lte, eq]
-  threshold    float
-  webhook_url  str
-  is_active    bool
-  created_at   datetime
+  id                UUID PK
+  agent             FK → Agent
+  metric_name       str          # avg_latency_ms, p95_latency_ms, duration_s, turn_count, ...
+  operator          enum [gt, lt, gte, lte, eq]
+  threshold         float
+  webhook_url       URLField
+  is_active         bool
+  created_at        datetime
 
 AlertEvent:
-  id              UUID, primary key
-  alert_config    FK → AlertConfig
-  call            FK → Call
-  triggered_at    datetime
-  metric_value    float
-  payload_sent    JSONB          # full webhook body for debugging
+  id                UUID PK
+  alert_config      FK → AlertConfig
+  call              FK → Call
+  triggered_at      datetime (auto_now_add)
+  metric_value      float
+  payload_sent      JSONB        # full webhook body for debugging
 ```
+
+---
+
+---
+
+# 3-TIER VERDICT SYSTEM
+
+Shunya evaluates test runs at three levels:
+
+| Tier | When | What | Who | Persisted Where |
+|------|------|------|-----|-----------------|
+| **1 — Heuristic Assertions** | After scenario steps, before TestResult | Checks known assertion names (e.g. `resolved_within_5_turns`, `agent_acknowledges_frustration`) with simple pattern-matching heuristics. Semantic assertions (`no_hallucinated_policy`) pass heuristically — real eval deferred to judge. | `runner._evaluate_assertions()` synchronous | `TestResult.assertion_results` JSONB |
+| **2 — During-Call Live Scores** | After each agent turn (remote mode only) | Concurrent `ScoringSubAgent` instances (one per rubric field) score the partial transcript using Claude Haiku. Scores posted to Django every turn. | `EvalAgent` + `ScoringSubAgent` (WorkerRunner) | `TestRun.live_scores` JSONB |
+| **3 — Post-Call LLM Judge** | After TestResult created | Claude Sonnet scores the full transcript 0.0–1.0 per rubric field; pass ≥ 0.7. This is the authoritative verdict. | `run_judge_task` → `judge.evaluate_result()` | `JudgeScore` rows |
 
 ---
 
@@ -306,67 +338,71 @@ AlertEvent:
 
 # API ENDPOINT MAP
 
-## Django DRF (tenant-scoped, all require `Authorization: Api-Key <key>`)
+## Django DRF (tenant-scoped)
 
 ```
+# Auth
+GET    /health/                                    # liveness
+
 # Agents
-GET    /api/agents/
-POST   /api/agents/
-GET    /api/agents/{id}/
-PATCH  /api/agents/{id}/
-DELETE /api/agents/{id}/
+GET    /api/v1/agents/                             # list
+POST   /api/v1/agents/                             # create (or sync from ElevenLabs)
+GET    /api/v1/agents/{id}/                        # detail
+PATCH  /api/v1/agents/{id}/                        # partial update
+DELETE /api/v1/agents/{id}/                        # delete
+POST   /api/v1/agents/{id}/chat/                   # text-mode conversation (Haiku)
+POST   /api/v1/agents/{id}/connect/                # start voice pipeline (browser join link)
+POST   /api/v1/agents/{id}/run-evals/              # run all scenarios in parallel (Celery group)
+POST   /api/v1/agents/sync-elevenlabs/             # sync agents from ElevenLabs account
 
 # Calls
-GET    /api/agents/{id}/calls/
-GET    /api/calls/{id}/
-GET    /api/calls/{id}/transcript/
-GET    /api/calls/{id}/metrics/
+GET    /api/v1/calls/                              # list
+GET    /api/v1/calls/{id}/                         # detail
+GET    /api/v1/calls/{id}/transcript/              # transcript
+GET    /api/v1/calls/{id}/metrics/                 # call metrics
 
 # Scenarios
-GET    /api/scenarios/
-POST   /api/scenarios/
-GET    /api/scenarios/{id}/
-PATCH  /api/scenarios/{id}/
-DELETE /api/scenarios/{id}/
+GET    /api/v1/scenarios/                          # list
+POST   /api/v1/scenarios/                          # create
+GET    /api/v1/scenarios/{id}/                     # detail
+PATCH  /api/v1/scenarios/{id}/                     # partial update
+DELETE /api/v1/scenarios/{id}/                     # delete
 
 # Test Runs
-POST   /api/agents/{id}/test-runs/     # triggers run; returns TestRun id immediately
-GET    /api/agents/{id}/test-runs/
-GET    /api/test-runs/{id}/
-GET    /api/test-runs/{id}/results/    # includes JudgeScores + assertion_results
+POST   /api/v1/test-runs/                          # create + dispatch
+GET    /api/v1/test-runs/{id}/                     # status + live scores + judge scores
+GET    /api/v1/test-runs/{id}/results/              # full result with transcript
+DELETE /api/v1/test-runs/clear/                     # delete all runs for tenant
 
-# Metrics
-GET    /api/agents/{id}/metrics/       # ?from=ISO&to=ISO  →  aggregate stats
-GET    /api/calls/{id}/metrics/
+# Metrics & Alerts
+GET    /api/v1/agents/{id}/metrics/                # aggregate stats (?from=ISO&to=ISO)
+GET    /api/v1/agents/{id}/alerts/                 # list alert configs for agent
+POST   /api/v1/agents/{id}/alerts/                 # create alert config
+GET    /api/v1/alerts/                             # list all alert configs
+GET    /api/v1/alerts/{id}/                        # detail
+PATCH  /api/v1/alerts/{id}/                        # update
+DELETE /api/v1/alerts/{id}/                        # delete
+GET    /api/v1/alerts/{id}/events/                 # alert history
+GET    /api/v1/alert-events/                       # all alert events
 
-# Alerts
-GET    /api/agents/{id}/alerts/
-POST   /api/agents/{id}/alerts/
-GET    /api/alerts/{id}/
-PATCH  /api/alerts/{id}/
-DELETE /api/alerts/{id}/
-GET    /api/alerts/{id}/events/
+# ElevenLabs Integration
+GET    /api/v1/integrations/elevenlabs/            # check if key is configured
+PUT    /api/v1/integrations/elevenlabs/            # save ElevenLabs API key
 ```
 
-## Agent chat endpoint (used by TextCaller)
-
-```
-POST   /api/agents/{id}/chat/          # body: {message, conversation_id}
-                                       # returns: {response, conversation_id, ts_ms}
-```
-
-## Internal endpoints (Pipecat → Django)
+## Internal endpoints (Pipecat → Django, service-to-service)
 
 ```
 POST   /internal/calls/start/          # body: {agent_id, source, daily_room_url, daily_room_name}
 POST   /internal/calls/{id}/turn/      # body: {speaker, text, ts_ms, quirks}
 POST   /internal/calls/{id}/end/       # triggers post-call Celery task (metrics + judge)
+POST   /internal/test-runs/{id}/live-scores/  # body: {turn, scores: [{field, score, passed, reasoning}]}
 ```
 
-## Recordings (served by Django, audio mode)
+## Recordings
 
 ```
-GET    /recordings/<run-id>.wav        # mono 16kHz WAV of the bot-to-bot call; inline audio/wav
+GET    /recordings/<run-id>.wav        # mono 16kHz WAV; served by Django _RecordingView
 ```
 
 ## FastAPI — Pipecat agent server (:8001)
@@ -374,12 +410,11 @@ GET    /recordings/<run-id>.wav        # mono 16kHz WAV of the bot-to-bot call; 
 ```
 GET    /health
 POST   /connect                        # body: {agent_id, system_prompt, voice_id}
-                                       #   creates Daily room (max_participants: 10), starts the agent
-                                       #   pipeline (bot joins), returns
-                                       #   {room_url, room_name, caller_token, observer_url}
-                                       #   observer_url = pre-authed browser join link for live listen-in
+                                       #   creates Daily room (max_participants: 10), starts agent
+                                       #   pipeline, returns {room_url, room_name, caller_token, observer_url}
+                                       #   Rate-limited: 5 concurrent pipelines
 POST   /caller/run                     # body: {room_url, room_token, steps, voice_id, recording_id}
-                                       #   waits for agent TTS readiness, then forwards to the caller service
+                                       #   waits for agent TTS readiness, proxies to caller /run
 ```
 
 ## FastAPI — Caller bot service (:8002)
@@ -387,15 +422,16 @@ POST   /caller/run                     # body: {room_url, room_token, steps, voi
 ```
 GET    /health
 POST   /run                            # body: {room_url, room_token, steps, voice_id, recording_id}
-                                       #   ScenarioCallerBot joins the room, runs the scenario,
+                                       #   ScenarioCallerBot joins room, runs scenario,
                                        #   writes /recordings/<recording_id>.wav,
                                        #   returns {transcript, recording_file}
-POST   /remote/connect                 # (no body) provisions a Daily room for a remote EL agent call,
+POST   /remote/connect                 # provisions Daily room for remote EL agent observer access
                                        #   returns {room_url, room_name, caller_token, observer_url}
 POST   /remote/run                     # body: {el_agent_id, steps, agent_api_key, ...}
-                                       #   EvalAgent (BaseWorker) connects to ElevenLabs Conversational AI WS,
-                                       #   drives scenario steps, bridges audio to Daily room,
+                                       #   EvalAgent connects to ElevenLabs ConvAI WS,
+                                       #   drives scenario steps, bridge audio to Daily room,
                                        #   runs concurrent ScoringSubAgents, returns {transcript, recording_file}
+                                       #   Rate-limited: 4 concurrent remote runs
 ```
 
 > The agent pipeline and the caller bot are **separate processes/containers** — `daily-python` cannot host two `CallClient`s (or call `Daily.init()` twice) in one process.
@@ -404,61 +440,80 @@ POST   /remote/run                     # body: {el_agent_id, steps, agent_api_ke
 
 ---
 
-# DIRECTORY STRUCTURE
+# DIRECTORY STRUCTURE (as-built)
 
 ```
-shunya/
-├── django_api/
+zenerate/web-py/
+├── apps/api/                          # Docker — Django control plane
 │   ├── manage.py
-│   ├── config/
-│   │   ├── settings/
-│   │   │   ├── base.py
-│   │   │   ├── local.py
-│   │   │   └── production.py
-│   │   ├── urls.py
-│   │   └── celery.py
-│   ├── apps/
-│   │   ├── tenants/            # Tenant, Domain, TenantAPIKey + auth middleware
-│   │   ├── agents/             # Agent, Call, Transcript, CallMetric
-│   │   │   └── chat.py         # Claude Haiku stateful chat handler (used by TextCaller)
-│   │   ├── testing/            # Scenario, TestRun, TestResult, JudgeScore
-│   │   │   ├── caller.py       # CallerInterface + TextCaller + AudioCaller
-│   │   │   ├── judge.py        # Claude LLM judge
-│   │   │   ├── runner.py       # Celery task: mode-aware, delegates to caller
-│   │   │   └── management/
-│   │   │       └── commands/
-│   │   │           └── load_scenarios.py
-│   │   └── monitoring/         # AlertConfig, AlertEvent + metric/alert Celery tasks
+│   ├── pyproject.toml
+│   ├── Dockerfile
+│   ├── src/zenapi/
+│   │   └── config/
+│   │       ├── settings/__init__.py   # single-file settings, ATONIC_REQUESTS=True, RLS middleware
+│   │       ├── urls.py                # root: /health, /api/v1/, /internal/, /recordings/
+│   │       └── url_confs/
+│   │           ├── urls.py            # health, knox auth, mounts voice + internal
+│   │           ├── voice.py           # mounts voice_qa sub-routers under /api/v1/
+│   │           └── email.py           # mounts email_pipeline under /api/v1/email/
+│   ├── celery.py                      # zenapi.celery app
+│   └── tests/                         # pytest suite (RSL-aware conftest)
+│       ├── conftest.py
+│       ├── factories.py
+│       ├── test_multitenant.py
+│       ├── test_voice_qa.py
+│       ├── test_new_coverage.py
+│       ├── test_runner_caller.py
+│       ├── test_tasks.py
+│       ├── test_live_scoring.py
+│       └── email_pipeline/
+│
+├── packages/
+│   ├── mt/                            # zenlib-mt-py (DO NOT MODIFY)
+│   │   └── src/zenlib/
+│   │       ├── reusable_apps/multitenant/  # Tenant, ActivityTenantBaseModel, middlewares
+│   │       └── django_utils/db/pg_rls/    # RLS policy builders
+│   │
+│   └── agent/                         # zenlib-agent-py (voice_qa + email_pipeline)
+│       └── src/zenlib_agentos/zenlib/reusable_apps/
+│           ├── voice_qa/              # ★ core product
+│           │   ├── models/__init__.py
+│           │   ├── views/__init__.py
+│           │   ├── urls/agents.py, urls/scenarios.py, urls/test_runs.py, urls/monitoring.py, urls/internal.py
+│           │   ├── serializers/__init__.py
+│           │   ├── services/runner.py, caller.py, judge.py, chat.py, quirks.py, metrics.py
+│           │   ├── tasks/__init__.py
+│           │   ├── authentication.py
+│           │   ├── middleware.py
+│           │   ├── throttling.py
+│           │   └── management/commands/load_scenarios.py
+│           └── email_pipeline/        # sidecar: LogicalThread, Message, ProcessedEvent
+│
+├── services/voice/                    # py3.12 / linux/amd64 (Daily SDK requirement)
+│   ├── server.py                      # FastAPI: /connect (agent) + /caller/run (proxy to caller)
+│   ├── pipeline.py                    # Agent pipeline: Daily→Silero VAD→Scribe v2→Haiku→11Labs
+│   ├── caller_server.py               # FastAPI: /run → ScenarioCallerBot; /remote/connect + /remote/run → EvalAgent
+│   ├── caller_bot.py                  # ScenarioCallerBot: virtual mic/speaker, TTS, Scribe, WAV
+│   ├── eval_agent.py                  # Pipecat WorkerRunner: EvalAgent + EvalBridge + ScoringSubAgent
+│   ├── audio_utils.py                 # shared TTS + WAV utilities
+│   ├── config.py                      # voice IDs, defaults
+│   ├── Dockerfile                     # --platform=linux/amd64 python:3.12-slim
 │   └── requirements.txt
 │
-├── services/voice/             # py3.12 / linux/amd64 (Daily SDK requirement)
-│   ├── server.py               # FastAPI: /connect (agent) + /caller/run (proxy to caller svc)
-│   ├── pipeline.py             # Agent pipeline: Daily→Scribe v2→Claude Haiku→ElevenLabs
-│   │                           #   incl. VADProcessor(Silero) before STT + RetryingElevenLabsTTSService
-│   ├── caller_server.py        # FastAPI (:8002): /run → ScenarioCallerBot; /remote/connect + /remote/run → EvalAgent
-│   ├── caller_bot.py           # ScenarioCallerBot: virtual mic/speaker, TTS, Scribe, WAV recording
-│   ├── eval_agent.py           # EvalAgent (BaseWorker), EvalBridge (raw daily.CallClient), ScoringSubAgent — remote EL agent test runner
-│   ├── audio_utils.py          # shared TTS + WAV recording utilities
-│   ├── config.py               # voice IDs, defaults
-│   ├── Dockerfile              # FROM --platform=linux/amd64 python:3.12-slim
-│   └── requirements.txt        # pipecat-ai[daily,elevenlabs,silero,anthropic,websockets]
+├── services/web/                      # Next.js 14 UI
+│   ├── app/agents/                    # agent list + detail (ElevenLabs gate)
+│   ├── app/scenarios/                 # scenario list
+│   ├── app/tests/                     # test run list + detail (transcript, scores, audio)
+│   └── components/                    # elevenlabs-gate, runs-table, transcript, modals
 │
 ├── cli/
-│   ├── main.py                 # Typer app root + main() wrapper (clean ShunyaError handling)
-│   └── client.py               # Thin HTTP client; raises ShunyaError on 4xx/connection errors
+│   ├── main.py                        # Typer: agents, scenarios, tests, calls
+│   └── client.py                      # HTTP client, ShunyaError handling
 │
-├── scenarios/                  # YAML scenario files (T5)
-│   ├── angry_customer_refund.yaml
-│   ├── booking_happy_path.yaml
-│   └── edge_case_gibberish.yaml
-│
-├── recordings/                 # bind-mounted: caller writes WAVs, django serves them
-├── setup.py                    # `pip install -e .` → `shunya` command (entry: cli.main:main)
-├── docker-compose.yml          # postgres, redis, django, celery_worker, pipecat, caller
-└── RUNBOOK.md
+├── scenarios/                         # YAML scenario files
+├── recordings/                        # bind-mounted: caller writes WAVs, django serves them
+└── docker-compose.yml                 # postgres, redis, django, celery_worker, pipecat, caller, web
 ```
-
-> Note: the CLI is a flat module (`cli/main.py` + `cli/client.py`), not a `shunya/commands/` package. Metrics/alerts live in the Django `monitoring` app and REST API, not as separate CLI command modules.
 
 ---
 
@@ -466,10 +521,10 @@ shunya/
 
 # CALLER INTERFACE
 
-Both callers are built. The test runner selects based on `TestRun.mode`.
+Three callers are built. The test runner selects based on `TestRun.mode` and `agent.target_type`.
 
 ```python
-# django_api/apps/testing/caller.py
+# packages/agent/.../voice_qa/services/caller.py
 
 class CallerInterface:
     def send(self, turn_text: str, conversation_id: str) -> dict: ...
@@ -477,7 +532,6 @@ class CallerInterface:
 class TextCaller(CallerInterface):
     """Strips Voice Quirks DSL, calls AgentChat (Claude Haiku) in-process."""
     def send(self, turn_text: str, conversation_id: str) -> dict:
-        # strips [stutter], [pause:3s] etc., runs Claude Haiku, returns the reply
         ...
 
 class AudioCaller(CallerInterface):
@@ -489,11 +543,21 @@ class AudioCaller(CallerInterface):
     def send(self, *a, **k):
         raise NotImplementedError("AudioCaller is full-scenario, not turn-by-turn.")
 
+class RemoteAudioCaller(CallerInterface):
+    """Full-scenario for ELEVENLABS agents. Calls /remote/connect + /remote/run
+    on the caller service (:8002). EvalAgent drives the ElevenLabs ConvAI WS."""
+    def run_scenario(self, steps, conversation_id, **kwargs) -> list[dict]:
+        ...
+    def send(self, *a, **k):
+        raise NotImplementedError("RemoteAudioCaller is full-scenario, not turn-by-turn.")
+
 def get_caller(mode, agent) -> CallerInterface:
+    if agent.target_type == Agent.TargetType.ELEVENLABS:
+        return RemoteAudioCaller(agent)
     return TextCaller(agent) if mode == "text" else AudioCaller(agent)
 ```
 
-> The runner branches on mode: audio mode calls `caller.run_scenario(...)` (whole scenario handed to the bot); text mode loops `caller.send(...)` per step.
+> The runner branches on mode + target_type: audio mode calls `caller.run_scenario()` (whole scenario handed to the bot); text mode loops `caller.send()` per step; remote mode delegates to the caller service's EvalAgent over the ElevenLabs Conversational AI WebSocket.
 
 ---
 
@@ -503,16 +567,18 @@ def get_caller(mode, agent) -> CallerInterface:
 
 | Phase | What | Key files |
 |---|---|---|
-| 1 | Django foundation: models + migrations + tenant setup + API key auth | `apps/tenants/`, all `models.py` files |
-| 2 | Agent chat endpoint + DRF viewsets for all resources | `apps/agents/chat.py`, `apps/*/views.py`, `config/urls.py` |
+| 1 | Django foundation: models + migrations + RLS tenant setup + API key auth | `packages/mt/`, `voice_qa/models/`, `authentication.py` |
+| 2 | Agent chat endpoint + DRF viewsets for all resources | `voice_qa/services/chat.py`, `voice_qa/views/`, `config/urls.py` |
 | 3 | Pipecat voice agent: pipeline + Daily room lifecycle | `services/voice/server.py`, `services/voice/pipeline.py` |
-| 4 | Text mode: YAML loader + TextCaller + Celery runner | `apps/testing/caller.py`, `apps/testing/runner.py`, `scenarios/` |
-| 5 | LLM Judge: Claude rubric scoring + JudgeScore writes | `apps/testing/judge.py` |
-| 6 | Audio fidelity mode: ScenarioCallerBot + remote EvalAgent (separate caller service) | `services/voice/caller_server.py`, `services/voice/caller_bot.py`, `services/voice/eval_agent.py`, `apps/testing/caller.py` |
-| 7 | Monitoring: post-call metrics + AlertConfig + webhook | `apps/monitoring/` |
-| 8 | CLI: Typer control plane | `cli/` |
-| 9 | Tests: pytest + bot-to-bot integration test | `tests/` |
-| 10 | Call recording + browser playback | `caller_bot.py`, `config/recordings.py` |
+| 4 | Text mode: YAML loader + TextCaller + Celery runner | `voice_qa/services/caller.py`, `voice_qa/services/runner.py`, `scenarios/` |
+| 5 | LLM Judge: Claude rubric scoring + JudgeScore writes | `voice_qa/services/judge.py` |
+| 6 | Audio fidelity mode: ScenarioCallerBot (separate caller service) | `services/voice/caller_server.py`, `services/voice/caller_bot.py` |
+| 7 | Remote ElevenLabs agent mode: EvalAgent + EvalBridge + ScoringSubAgent | `services/voice/eval_agent.py`, `services/voice/caller_server.py` |
+| 8 | Monitoring: post-call metrics + AlertConfig + webhook | `voice_qa/services/metrics.py`, `voice_qa/models/` |
+| 9 | CLI: Typer control plane | `cli/` |
+| 10 | Tests: pytest + RLS + live scoring + runner tests | `tests/` |
+| 11 | Call recording + browser playback | `caller_bot.py`, `config/urls.py` (`_RecordingView`) |
+| 12 | Web UI: Next.js | `services/web/` |
 
 ---
 
@@ -550,5 +616,8 @@ ElevenLabs ignores `output_format` when it's in the **JSON body** and returns **
 - `RetryingElevenLabsTTSService` retries the TTS WS connect with backoff (transient edge 403s).
 
 ### Live listen-in (observer URL)
-`/connect` mints a third, non-owner **observer token** and returns `observer_url = "{room_url}?t={token}"`; rooms are created with `max_participants: 10` to leave headroom for human observers. The runner calls `AudioCaller._connect()` *before* the scenario starts and persists the link to `TestRun.observer_url` (`URLField`, migrations 0002/0004). The CLI prints **👁 Join to observe** during a `--wait` poll the moment the run reports `running`. This is per-run live monitoring; an aggregate "all calls" dashboard URL isn't possible because each call is its own ephemeral room.
+`/connect` mints a third, non-owner **observer token** and returns `observer_url = "{room_url}?t={token}"`; rooms are created with `max_participants: 10` to leave headroom for human observers. The runner calls `AudioCaller._connect()` *before* the scenario starts and persists the link to `TestRun.observer_url` (`URLField`). The CLI prints a join link during a `--wait` poll the moment the run reports `running`. This is per-run live monitoring; an aggregate "all calls" dashboard URL isn't possible because each call is its own ephemeral room.
 
+### Concurrency limits
+- **Pipecat `/connect`**: max 5 concurrent pipelines (returns 429 beyond that).
+- **Caller `/remote/run`**: max 4 concurrent remote EvalAgent runs (returns 429 beyond that).
