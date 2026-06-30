@@ -167,26 +167,13 @@ HEURISTIC_ASSERTIONS = frozenset({
     "agent_asks_for_clarification_when_unclear",
 })
 
-# Assertions that require understanding of intent/policy — evaluated by the LLM judge.
-# runner sets passed=None; judge.evaluate_result fills them in.
-SEMANTIC_ASSERTIONS = frozenset({
-    "no_hallucinated_policy",
-    "agent_does_not_promise_impossible_timeline",
-    "agent_maintains_patience",
-    "agent_does_not_fabricate_account_details",
-})
-
-
 def _evaluate_assertions(assertions, transcript, agent):
     agent_turns = [t["text"].lower() for t in transcript if t["speaker"] == "agent"]
     full_text = " ".join(agent_turns)
-    results = []
-    for a in assertions:
-        if a in SEMANTIC_ASSERTIONS:
-            results.append({"assertion": a, "passed": None, "semantic": True})
-        else:
-            results.append({"assertion": a, "passed": _check_assertion(a, transcript, full_text), "semantic": False})
-    return results
+    return [
+        {"assertion": a, "passed": _check_assertion(a, transcript, full_text), "semantic": False}
+        for a in assertions
+    ]
 
 
 def _check_assertion(assertion, transcript, full_agent_text):

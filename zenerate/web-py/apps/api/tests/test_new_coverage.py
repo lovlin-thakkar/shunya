@@ -1,12 +1,5 @@
-"""Coverage boost tests: judge, metrics, views (ElevenLabs, run-evals, clear),
+"""Coverage boost tests: metrics, views (ElevenLabs, run-evals, clear),
 serializers (ScenarioSerializer, AlertConfigSerializer), and remaining assertion checks.
-
-Targets the lowest-coverage modules:
-- services/judge.py (20% → target 70%)
-- services/metrics.py (17% → target 70%)
-- services/runner.py assertions that were not exercised
-- views/__init__.py (ElevenLabs integration, run_evals, clear, agent PATCH)
-- serializers (ScenarioSerializer create/update/validate, AlertConfig SSRF guard)
 """
 from __future__ import annotations
 
@@ -71,146 +64,6 @@ def call_obj(tenant_a, in_tenant, agent_obj):
         c.started_at = timezone.now()
         c.save(update_fields=["started_at"])
         return c
-
-
-# ===========================================================================
-# judge.py — evaluate_result() with mocked Anthropic
-# ===========================================================================
-
-def test_judge_evaluate_result_writes_scores(tenant_a, in_tenant, agent_obj, scenario_obj):
-    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.judge import evaluate_result
-
-    with in_tenant(tenant_a):
-        run = TestRun.objects.create(agent=agent_obj, scenario=scenario_obj)
-        result = TestResult.objects.create(
-            test_run=run, passed=True,
-            transcript=[
-                {"speaker": "caller", "text": "I need a refund"},
-                {"speaker": "agent", "text": "I'm sorry, let me help you."},
-            ],
-            assertion_results=[],
-        )
-
-    judge_response = MagicMock()
-    judge_response.content = [MagicMock(text="""{
-        "scores": {
-            "safety": {"score": 1.0, "reasoning": "Agent stayed safe.", "passed": true},
-            "goal_completion": {"score": 0.8, "reasoning": "Mostly resolved.", "passed": true}
-        },
-        "assertions": {},
-        "overall_reasoning": "Good call."
-    }""")]
-
-    with patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.services.judge.anthropic.Anthropic") as MockAnth:
-        MockAnth.return_value.messages.create.return_value = judge_response
-        with in_tenant(tenant_a):
-            evaluate_result(str(result.id), {"safety": 1.0, "goal_completion": 1.0})
-
-    with in_tenant(tenant_a):
-        scores = JudgeScore.objects.filter(test_result=result)
-    assert scores.count() == 2
-    fields = set(scores.values_list("field", flat=True))
-    assert "safety" in fields
-    assert "goal_completion" in fields
-
-
-def test_judge_evaluate_result_not_found(tenant_a, in_tenant):
-    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.judge import evaluate_result
-    import uuid
-    with in_tenant(tenant_a):
-        evaluate_result(str(uuid.uuid4()), {})  # should log error and return silently
-
-
-def test_judge_evaluate_result_non_json_response(tenant_a, in_tenant, agent_obj, scenario_obj):
-    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.judge import evaluate_result
-
-    with in_tenant(tenant_a):
-        run = TestRun.objects.create(agent=agent_obj, scenario=scenario_obj)
-        result = TestResult.objects.create(
-            test_run=run, passed=True, transcript=[], assertion_results=[],
-        )
-
-    bad_response = MagicMock()
-    bad_response.content = [MagicMock(text="This is not JSON")]
-
-    with patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.services.judge.anthropic.Anthropic") as MockAnth:
-        MockAnth.return_value.messages.create.return_value = bad_response
-        with in_tenant(tenant_a):
-            evaluate_result(str(result.id), {})  # should log error, not raise
-
-    with in_tenant(tenant_a):
-        assert JudgeScore.objects.filter(test_result=result).count() == 0
-
-
-def test_judge_evaluate_result_with_semantic_assertions(tenant_a, in_tenant, agent_obj, scenario_obj):
-    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.judge import evaluate_result
-
-    with in_tenant(tenant_a):
-        run = TestRun.objects.create(agent=agent_obj, scenario=scenario_obj)
-        result = TestResult.objects.create(
-            test_run=run, passed=True,
-            transcript=[{"speaker": "agent", "text": "I can help."}],
-            assertion_results=[
-                {"assertion": "no_hallucinated_policy", "passed": None, "semantic": True}
-            ],
-        )
-
-    judge_response = MagicMock()
-    judge_response.content = [MagicMock(text="""{
-        "scores": {"safety": {"score": 0.9, "reasoning": "ok", "passed": true}},
-        "assertions": {"no_hallucinated_policy": {"passed": true, "reasoning": "No hallucination found."}},
-        "overall_reasoning": "Good."
-    }""")]
-
-    with patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.services.judge.anthropic.Anthropic") as MockAnth:
-        MockAnth.return_value.messages.create.return_value = judge_response
-        with in_tenant(tenant_a):
-            evaluate_result(str(result.id), {"safety": 1.0})
-
-    with in_tenant(tenant_a):
-        result.refresh_from_db()
-    assert result.assertion_results[0]["passed"] is True
-    assert "No hallucination" in result.assertion_results[0]["reasoning"]
-
-
-def test_judge_format_transcript_with_quirks():
-    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.judge import _format_transcript
-    turns = [
-        {"speaker": "caller", "text": "I want a refund", "quirks": ["stutter"]},
-        {"speaker": "agent", "text": "Let me help.", "quirks": []},
-    ]
-    formatted = _format_transcript(turns)
-    assert "CALLER" in formatted
-    assert "stutter" in formatted
-    assert "AGENT" in formatted
-
-
-def test_judge_evaluate_strips_markdown_fences(tenant_a, in_tenant, agent_obj, scenario_obj):
-    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.judge import evaluate_result
-
-    with in_tenant(tenant_a):
-        run = TestRun.objects.create(agent=agent_obj, scenario=scenario_obj)
-        result = TestResult.objects.create(
-            test_run=run, passed=True, transcript=[], assertion_results=[],
-        )
-
-    # LLM sometimes wraps JSON in ```json fences
-    fenced_response = MagicMock()
-    fenced_response.content = [MagicMock(text="""```json
-{
-    "scores": {"safety": {"score": 1.0, "reasoning": "ok", "passed": true}},
-    "assertions": {},
-    "overall_reasoning": "Great."
-}
-```""")]
-
-    with patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.services.judge.anthropic.Anthropic") as MockAnth:
-        MockAnth.return_value.messages.create.return_value = fenced_response
-        with in_tenant(tenant_a):
-            evaluate_result(str(result.id), {"safety": 1.0})
-
-    with in_tenant(tenant_a):
-        assert JudgeScore.objects.filter(test_result=result, field="safety").exists()
 
 
 # ===========================================================================
@@ -729,18 +582,8 @@ def test_test_run_list_includes_agent_name(client_a, tenant_a, in_tenant, agent_
 
 
 # ===========================================================================
-# caller — AudioCaller reset
+# caller — RemoteAudioCaller
 # ===========================================================================
-
-def test_audio_caller_reset_clears_room(agent_obj):
-    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.caller import AudioCaller
-    caller = AudioCaller(agent_obj)
-    caller._room_url = "https://daily.co/test-room"
-    caller._caller_token = "tok-abc"
-    caller.reset()
-    assert caller._room_url is None
-    assert caller._caller_token is None
-
 
 def test_remote_caller_reset_is_noop(remote_agent):
     from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.caller import RemoteAudioCaller

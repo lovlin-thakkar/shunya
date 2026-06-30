@@ -124,19 +124,6 @@ def test_get_caller_returns_text_caller(agent_obj):
     assert isinstance(caller, TextCaller)
 
 
-def test_get_caller_returns_audio_caller(agent_obj):
-    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.caller import get_caller, AudioCaller
-    caller = get_caller("audio", agent_obj)
-    assert isinstance(caller, AudioCaller)
-
-
-def test_audio_caller_send_raises(agent_obj):
-    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.caller import AudioCaller
-    caller = AudioCaller(agent_obj)
-    with pytest.raises(NotImplementedError):
-        caller.send("hello", "conv")
-
-
 # ---------------------------------------------------------------------------
 # runner.run_scenario — text mode end-to-end (mocked Anthropic + judge task)
 # ---------------------------------------------------------------------------
@@ -147,11 +134,8 @@ def test_run_scenario_text_mode(tenant_a, in_tenant, test_run):
     mock_response = MagicMock()
     mock_response.content = [MagicMock(text="Sorry to hear that, let me help.")]
 
-    with patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.services.chat.anthropic.Anthropic") as MockAnthropic, \
-         patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.tasks.run_judge_task") as mock_judge:
+    with patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.services.chat.anthropic.Anthropic") as MockAnthropic:
         MockAnthropic.return_value.messages.create.return_value = mock_response
-        mock_judge.delay = MagicMock()
-
         with in_tenant(tenant_a):
             run_scenario(str(test_run.id))
 
@@ -181,10 +165,8 @@ def test_run_scenario_with_greeting(tenant_a, in_tenant):
     mock_response = MagicMock()
     mock_response.content = [MagicMock(text="How may I help?")]
 
-    with patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.services.chat.anthropic.Anthropic") as MockAnthropic, \
-         patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.tasks.run_judge_task") as mock_judge:
+    with patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.services.chat.anthropic.Anthropic") as MockAnthropic:
         MockAnthropic.return_value.messages.create.return_value = mock_response
-        mock_judge.delay = MagicMock()
         with in_tenant(tenant_a):
             run_scenario(str(run.id))
 
@@ -194,51 +176,6 @@ def test_run_scenario_with_greeting(tenant_a, in_tenant):
     # Greeting should be first turn
     assert result.transcript[0]["speaker"] == "agent"
     assert result.transcript[0]["text"] == "Welcome!"
-
-
-# ---------------------------------------------------------------------------
-# views: agent connect (mocked httpx)
-# ---------------------------------------------------------------------------
-
-def test_agent_connect_action(tenant_a, in_tenant, agent_obj):
-    from rest_framework.test import APIClient
-    from zenlib_agentos.zenlib.reusable_apps.voice_qa.models import TenantAPIKey
-
-    with in_tenant(tenant_a):
-        _, raw = TenantAPIKey.generate(tenant_a)
-    client = APIClient()
-    client.credentials(HTTP_AUTHORIZATION=f"Api-Key {raw}")
-
-    fake_room = {"room_url": "https://daily.co/room-x", "room_name": "room-x",
-                 "caller_token": "tok", "observer_url": "https://daily.co/room-x?t=obs"}
-
-    with patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.views.httpx.post") as mock_post:
-        mock_post.return_value = MagicMock(status_code=200)
-        mock_post.return_value.json.return_value = fake_room
-        mock_post.return_value.raise_for_status = MagicMock()
-        with in_tenant(tenant_a):
-            resp = client.post(f"/api/v1/agents/{agent_obj.id}/connect/", {}, format="json")
-
-    assert resp.status_code == 200
-    assert "room_url" in resp.data
-
-
-def test_agent_connect_pipecat_down(tenant_a, in_tenant, agent_obj):
-    from rest_framework.test import APIClient
-    from zenlib_agentos.zenlib.reusable_apps.voice_qa.models import TenantAPIKey
-    import httpx
-
-    with in_tenant(tenant_a):
-        _, raw = TenantAPIKey.generate(tenant_a)
-    client = APIClient()
-    client.credentials(HTTP_AUTHORIZATION=f"Api-Key {raw}")
-
-    with patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.views.httpx.post") as mock_post:
-        mock_post.side_effect = httpx.ConnectError("refused")
-        with in_tenant(tenant_a):
-            resp = client.post(f"/api/v1/agents/{agent_obj.id}/connect/", {}, format="json")
-
-    assert resp.status_code == 503
 
 
 # ---------------------------------------------------------------------------
@@ -329,9 +266,7 @@ def test_run_scenario_remote_mode(tenant_a, in_tenant, remote_agent):
     with patch(
         "zenlib_agentos.zenlib.reusable_apps.voice_qa.services.caller.RemoteAudioCaller.run_scenario",
         return_value=transcript,
-    ) as mock_run, \
-         patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.tasks.run_judge_task") as mock_judge:
-        mock_judge.delay = MagicMock()
+    ) as mock_run:
         with in_tenant(tenant_a):
             run_scenario(str(run.id))
 

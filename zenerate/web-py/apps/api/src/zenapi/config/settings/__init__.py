@@ -116,13 +116,10 @@ REST_KNOX = {"TOKEN_TTL": None}
 _DEV_SERVICE_TOKEN = "dev-service-token-change-me"
 SERVICE_TOKEN = os.environ.get("SERVICE_TOKEN", _DEV_SERVICE_TOKEN)
 
-# Voice QA / Pipecat
+# Voice QA
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
 DAILY_API_KEY = os.environ.get("DAILY_API_KEY", "")
-PIPECAT_SERVER_URL = os.environ.get("PIPECAT_SERVER_URL", "http://localhost:8001")
-# Caller service — RemoteAudioCaller posts directly here to drive remote
-# ElevenLabs agents over WebSocket (no Pipecat/Daily room involved).
 CALLER_SERVER_URL = os.environ.get("CALLER_SERVER_URL", "http://localhost:8002")
 RECORDINGS_DIR = os.environ.get("RECORDINGS_DIR", "/recordings")
 

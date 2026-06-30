@@ -1,7 +1,6 @@
 """
-Standalone FastAPI server for the scenario caller bot.
-Runs in a separate process with its own Daily SDK context,
-isolated from the agent pipeline process.
+Caller service: drives remote ElevenLabs Conversational AI agents.
+Runs in a separate process with its own Daily SDK context.
 """
 import logging
 import os
@@ -14,7 +13,7 @@ from pydantic import BaseModel
 
 from daily import Daily
 
-from config import DEFAULT_VOICE_ID, CALLER_DEFAULT_VOICE_ID
+from config import CALLER_DEFAULT_VOICE_ID
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -63,31 +62,6 @@ async def _get_room_token(room_name: str, is_owner: bool = True) -> str:
         return r.json()["token"]
 
 
-class CallerRunRequest(BaseModel):
-    room_url: str
-    room_token: str
-    steps: list[dict]
-    voice_id: str = DEFAULT_VOICE_ID
-    recording_id: str = ""
-
-
-@app.post("/run", dependencies=[Depends(_require_service_token)])
-async def run(req: CallerRunRequest):
-    from caller_bot import ScenarioCallerBot
-    bot = ScenarioCallerBot(
-        room_url=req.room_url,
-        room_token=req.room_token,
-        steps=req.steps,
-        voice_id=req.voice_id,
-        recording_id=req.recording_id,
-    )
-    try:
-        transcript = await bot.run()
-    except Exception as e:
-        logger.error(f"Caller bot failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-    return JSONResponse({"transcript": transcript, "recording_file": bot.recording_file})
-
 
 @app.post("/remote/connect", dependencies=[Depends(_require_service_token)])
 async def remote_connect():
@@ -134,9 +108,8 @@ class RemoteRunRequest(BaseModel):
 async def remote_run(req: RemoteRunRequest):
     """Drive a scenario against a customer's deployed ElevenLabs agent.
 
-    Uses the Pipecat-powered EvalAgent which joins the Daily room as
-    "Shunya Eval" and bridges audio between the room and the ElevenLabs
-    Conversational AI WebSocket. Scoring sub-agents run concurrently."""
+    EvalAgent connects to the ElevenLabs ConvAI WebSocket, speaks each scenario
+    step via EL TTS, and scores each agent turn concurrently via Scorer."""
     global _active_remote
     if _active_remote >= MAX_CONCURRENT_REMOTE:
         logger.warning("Remote caller at capacity (%d/%d), rejecting", _active_remote, MAX_CONCURRENT_REMOTE)
