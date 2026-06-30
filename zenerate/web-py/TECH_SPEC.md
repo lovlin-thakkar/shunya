@@ -45,7 +45,7 @@ External APIs: Claude Haiku 4.5 (agent brain), Claude Sonnet 4.6 (LLM judge),
                ElevenLabs (TTS + Scribe v2 STT), Daily.co (WebRTC transport)
 
 Deployment: docker-compose — postgres, redis, django, celery_worker,
-            celery_beat, pipecat (:8001, py3.12/amd64), caller (:8002, py3.12/amd64).
+            pipecat (:8001, py3.12/amd64), caller (:8002, py3.12/amd64).
             ./recordings is bind-mounted into caller (writes) and django (serves).
 ```
 
@@ -422,7 +422,7 @@ shunya/
 │   │   │   └── management/
 │   │   │       └── commands/
 │   │   │           └── load_scenarios.py
-│   │   └── monitoring/         # AlertConfig, AlertEvent + Celery beat tasks
+│   │   └── monitoring/         # AlertConfig, AlertEvent + metric/alert Celery tasks
 │   └── requirements.txt
 │
 ├── pipecat_agent/              # py3.12 / linux/amd64 (Daily SDK requirement)
@@ -445,7 +445,7 @@ shunya/
 │
 ├── recordings/                 # bind-mounted: caller writes WAVs, django serves them
 ├── setup.py                    # `pip install -e .` → `shunya` command (entry: cli.main:main)
-├── docker-compose.yml          # postgres, redis, django, celery_worker, celery_beat, pipecat, caller
+├── docker-compose.yml          # postgres, redis, django, celery_worker, pipecat, caller
 └── RUNBOOK.md
 ```
 

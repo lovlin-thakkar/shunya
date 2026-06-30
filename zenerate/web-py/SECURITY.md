@@ -15,12 +15,14 @@ Findings from internal review of the Shunya voice AI QA platform. Ranked by crit
 
 ---
 
-### 2. SSRF via webhook URLs
-**File:** `packages/agent/src/zenlib_agentos/zenlib/reusable_apps/voice_qa/services/metrics.py` (line 71)
+### 2. SSRF via webhook URLs — ✅ RESOLVED
+**File:** `packages/agent/src/zenlib_agentos/zenlib/reusable_apps/voice_qa/services/metrics.py`
 
-`AlertConfig.webhook_url` is a raw user-supplied URL with no validation. The Celery beat worker makes HTTP POST requests to it directly. A malicious tenant can set it to internal targets: `http://postgres:5432`, `http://redis:6379`, `http://169.254.169.254` (cloud metadata), etc.
+`AlertConfig.webhook_url` is a raw user-supplied URL. When a call ends, the `compute_call_metrics` Celery worker evaluates the agent's alerts and POSTs to this URL directly. A malicious tenant could set it to internal targets: `http://postgres:5432`, `http://redis:6379`, `http://169.254.169.254` (cloud metadata), etc.
 
-**Fix:** Validate webhook URLs against a blocklist of private IP ranges (127.0.0.1, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) and private hostnames before storing or firing.
+**Resolution:** `_fire_alert()` now calls `_is_safe_webhook_url()` before every POST. It rejects non-http(s) schemes, the hostnames `localhost`/`metadata.google.internal`/`169.254.169.254`, and any hostname that resolves to a private/loopback/link-local/reserved address. Blocked URLs are logged and skipped; the `AlertEvent` is still recorded. Verified manually: a `127.0.0.1` webhook is blocked.
+
+**Residual risk:** DNS-rebinding (the host resolves to a public IP at check time, a private one at request time) is not covered, since the resolve-and-connect are separate. Acceptable for now; revisit if alerts move off the trusted internal network.
 
 ---
 

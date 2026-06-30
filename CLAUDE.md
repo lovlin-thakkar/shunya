@@ -49,11 +49,8 @@ uv run python manage.py load_agents --dir ../../agents
 # Dev server (port 8000)
 uv run python manage.py runserver
 
-# Celery worker (required for test runs and LLM judge)
+# Celery worker (required for test runs, LLM judge, and metric/alert computation)
 uv run celery -A zenapi.celery worker --loglevel=info
-
-# Celery beat (monitoring/alert tasks)
-uv run celery -A zenapi.celery beat --loglevel=info
 ```
 
 ### Tests
@@ -100,7 +97,7 @@ shunya calls transcript <call-id>
 
 ```bash
 cd zenerate/web-py
-docker compose up    # postgres, redis, django, celery_worker, celery_beat, pipecat (:8001), caller (:8002)
+docker compose up    # postgres, redis, django, celery_worker, pipecat (:8001), caller (:8002)
 ```
 
 **Gotcha:** `celery_worker` does NOT auto-reload on code changes. After editing voice_qa services or tasks, run `docker compose restart celery_worker`. (Django, pipecat, and caller all run with `--reload`.)

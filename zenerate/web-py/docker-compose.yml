@@ -80,29 +80,6 @@ services:
       redis:
         condition: service_healthy
 
-  celery_beat:
-    build:
-      context: .
-      dockerfile: apps/api/Dockerfile
-    command: uv run celery -A zenapi.celery beat --loglevel=info
-    working_dir: /app/apps/api
-    volumes:
-      - .:/app
-      - django_venv:/app/.venv
-    env_file:
-      - ./apps/api/.env
-    environment:
-      DB_HOST: db
-      DB_USER: zen
-      DB_PASSWORD: zen
-      DB_NAME: zenapi
-      REDIS_URL: redis://redis:6379/0
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
   pipecat:
     build:
       context: ./services/voice

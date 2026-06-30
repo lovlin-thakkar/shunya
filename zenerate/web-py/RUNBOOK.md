@@ -43,7 +43,7 @@ cd /Users/lovlinthakkar/PycharmProjects/Shunya
 
 # Put keys in django_api/.env and pipecat_agent/.env (see §1 Configure environment)
 docker-compose build
-docker-compose up -d        # postgres, redis, django, celery_worker, celery_beat, pipecat, caller
+docker-compose up -d        # postgres, redis, django, celery_worker, pipecat, caller
 
 # One-time DB + tenant + scenario bootstrap (inside the django container):
 docker-compose exec django python manage.py migrate_schemas --shared
@@ -252,13 +252,6 @@ Required for test runs to execute in the background:
 ```bash
 cd django_api
 celery -A config worker --loglevel=info
-```
-
-In a second terminal for scheduled tasks:
-
-```bash
-cd django_api
-celery -A config beat --loglevel=info
 ```
 
 ---

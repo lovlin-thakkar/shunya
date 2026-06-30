@@ -78,8 +78,7 @@ separate FastAPI services (`:8001` agent, `:8002` caller).
 | Service          | Process / Port      | Entry point                       | Role                                                            |
 |------------------|---------------------|-----------------------------------|----------------------------------------------------------------|
 | **Django API**   | `:8000`             | `django_api/config/`              | Multi-tenant REST control plane; serves `/recordings/*.wav`     |
-| **Celery worker**| —                   | `django_api/apps/*/tasks.py`      | Runs scenarios + LLM judge; NOT auto-reloaded                   |
-| **Celery beat**  | —                   | `config/celery.py`                | Schedules monitoring/alert rollups                              |
+| **Celery worker**| —                   | `django_api/apps/*/tasks.py`      | Runs scenarios + LLM judge + metric/alert computation; NOT auto-reloaded |
 | **Pipecat agent**| `:8001`             | `pipecat_agent/server.py`         | The voice **agent under test** pipeline                         |
 | **Caller bot**   | `:8002`             | `pipecat_agent/caller_server.py`  | The synthetic **caller** (`ScenarioCallerBot`)                  |
 | **CLI**          | local               | `cli/main.py`                     | Thin wrapper over the REST API (`shunya …`)                     |
