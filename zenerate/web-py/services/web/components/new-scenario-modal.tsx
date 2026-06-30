@@ -314,7 +314,7 @@ export function NewScenarioModal({ agents, onClose, scenario }: Props) {
   const [persona, setPersona] = useState(scenario?.persona ?? "");
   const [steps, setSteps] = useState<string[]>(
     scenario?.steps?.length
-      ? scenario.steps.map((s) => (typeof s === "string" ? s : s.text ?? s.raw ?? ""))
+      ? scenario.steps.map((s) => (typeof s === "string" ? s : s.raw ?? s.text ?? ""))
       : ["", ""]
   );
   const [assertions, setAssertions] = useState<string[]>(scenario?.assertions ?? []);

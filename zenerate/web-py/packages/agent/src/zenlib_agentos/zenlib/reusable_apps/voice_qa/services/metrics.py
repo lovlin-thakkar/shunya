@@ -3,6 +3,8 @@ import logging
 import socket
 from urllib.parse import urlparse
 
+import httpx
+
 from django.utils import timezone
 
 from ..models import Call, Transcript, CallMetric, AlertConfig, AlertEvent
@@ -80,7 +82,6 @@ def _check_alerts(call, metrics):
 
 
 def _fire_alert(config, call, value):
-    import httpx
     payload = {
         "alert": config.metric_name, "operator": config.operator,
         "threshold": float(config.threshold), "actual": value,

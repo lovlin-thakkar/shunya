@@ -1,9 +1,11 @@
 from rest_framework import serializers
+
 from ..models import (
     Agent, Call, Transcript, CallMetric,
     Scenario, TestRun, TestResult, JudgeScore,
     AlertConfig, AlertEvent,
 )
+from ..services.quirks import parse_step
 
 
 class AgentSerializer(serializers.ModelSerializer):
@@ -94,7 +96,7 @@ class ScenarioSerializer(serializers.ModelSerializer):
         normalised = []
         for item in value:
             if isinstance(item, str):
-                normalised.append({"text": item, "raw": item, "quirks": []})
+                normalised.append(parse_step(item))
             elif isinstance(item, dict):
                 normalised.append({
                     "text": item.get("text", item.get("raw", "")),
