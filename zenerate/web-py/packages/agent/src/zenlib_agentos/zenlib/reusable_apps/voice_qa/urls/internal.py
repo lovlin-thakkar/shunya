@@ -91,9 +91,17 @@ class LiveScoresView(APIView):
         if claimed_tenant_id and str(run.agent.tenant_id) != str(claimed_tenant_id):
             return Response({"error": "Run does not belong to the specified tenant"}, status=403)
 
+        # Merge incoming scores by field into existing live_scores so that
+        # concurrent per-field POSTs (if any) don't race-overwrite each other.
+        incoming = request.data.get("scores", [])
+        existing = {s["field"]: s for s in (run.live_scores or {}).get("scores", [])}
+        for s in incoming:
+            field = s.get("field")
+            if field:
+                existing[field] = s
         run.live_scores = {
-            "turn": request.data.get("turn", 0),
-            "scores": request.data.get("scores", []),
+            "turn": request.data.get("turn", run.live_scores.get("turn", 0) if run.live_scores else 0),
+            "scores": list(existing.values()),
         }
         run.save(update_fields=["live_scores"])
         return Response({"ok": True})

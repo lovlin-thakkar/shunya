@@ -260,7 +260,12 @@ class TestRunViewSet(viewsets.ModelViewSet):
             return Response({"error": "Agent not found"}, status=404)
 
         try:
-            scenario = Scenario.objects.get(name=scenario_name, tenant=tenant)
+            import uuid as _uuid
+            try:
+                _uuid.UUID(str(scenario_name))
+                scenario = Scenario.objects.get(id=scenario_name, tenant=tenant)
+            except (ValueError, AttributeError):
+                scenario = Scenario.objects.get(name=scenario_name, tenant=tenant)
         except Scenario.DoesNotExist:
             return Response({"error": f"Scenario '{scenario_name}' not found"}, status=404)
 

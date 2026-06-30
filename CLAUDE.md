@@ -166,8 +166,11 @@ CLI / external client
                          caller: ElevenLabs TTS in (virtual mic) + Scribe v2 on agent audio (virtual speaker)
                       → caller writes /recordings/<run-id>.wav
       → remote mode (ELEVENLABS agent): RemoteAudioCaller → caller /remote/run (:8002)
-                      → EvalAgent connects to ElevenLabs Conversational AI WebSocket,
-                        drives scenario steps, concurrent ScoringSubAgents score live
+                      → EvalAgent (plain async class) connects to ElevenLabs Conversational AI WebSocket,
+                        drives scenario steps; EvalBridge relays audio to Daily room for live listen-in
+                        (only ONE EvalBridge active per process — second concurrent run runs WS-only)
+                      → Scorer scores all rubric fields concurrently after each agent turn (Claude Sonnet)
+                        posts ONE atomic batch to Django via /internal/test-runs/{id}/live-scores/
 ```
 
 ### Key Data Flow: Test Run
@@ -176,17 +179,16 @@ CLI / external client
 2. `run_scenario_task` → calls `runner.run_scenario()` → uses `CallerInterface` (text, audio, or remote mode)
 3. `TextCaller.send()` → strips Voice Quirks DSL → calls `AgentChat.send()` (Claude Haiku in-process)
 4. Audio mode: `AudioCaller._connect()` → Pipecat `/connect` (provisions Daily room + starts agent pipeline), persists `observer_url` to `TestRun.observer_url`. Then `AudioCaller.run_scenario(...)` → Pipecat `/caller/run` (waits for agent TTS readiness) → caller service `/run`; `ScenarioCallerBot` joins room, speaks steps via ElevenLabs TTS (virtual mic), captures agent via virtual speaker + Scribe v2, writes `/recordings/<run-id>.wav`
-5. Remote mode (ELEVENLABS agents): `RemoteAudioCaller.run_scenario()` → caller service `/remote/connect` + `/remote/run`; `EvalAgent` connects to ElevenLabs Conversational AI WebSocket, drives scenario steps, concurrent `ScoringSubAgent` instances score each turn live; posts live scores to Django via `/internal/test-runs/{id}/live-scores/`
-6. After all steps: creates `TestResult`, dispatches `run_judge_task`
-7. `run_judge_task` → calls `judge.evaluate_result()` → Claude Sonnet scores transcript 0.0–1.0 per field (pass ≥ 0.7) → writes `JudgeScore` rows
+5. Remote mode (ELEVENLABS agents): `RemoteAudioCaller.run_scenario()` → caller service `/remote/connect` + `/remote/run`; `EvalAgent` connects to ElevenLabs Conversational AI WebSocket, drives scenario steps; `Scorer` scores all rubric fields concurrently (Claude Sonnet) after each turn and posts one atomic batch to Django. `_promote_live_scores()` in `runner.py` reads the final batch and writes permanent `JudgeScore` rows after the call.
+6. After all steps: creates `TestResult`, calls `_promote_live_scores()` — for remote mode this writes `JudgeScore` rows from live scores; for text/audio mode this is a no-op (no live scores exist).
 
 ### 3-Tier Verdict System
 
 | Tier | When | What | Who |
 |------|------|------|-----|
 | 1 — Heuristic Assertions | After scenario steps, before judge | Checks known assertion names (`resolved_within_5_turns`, etc.) in `runner._evaluate_assertions()` | Synchronous in `run_scenario()` |
-| 2 — During-Call Live Scores | After each agent turn (remote mode only) | Concurrent `ScoringSubAgent` instances score partial transcript via Claude Haiku; posted to `POST /internal/test-runs/{id}/live-scores/` stored in `TestRun.live_scores` | `EvalAgent` + `ScoringSubAgent` (WorkerRunner) |
-| 3 — Post-Call LLM Judge | After TestResult created | Claude Sonnet scores full transcript 0.0–1.0 per rubric field; pass ≥ 0.7; writes authoritative `JudgeScore` rows | `run_judge_task` → `judge.evaluate_result()` |
+| 2 — During-Call Live Scores | After each agent turn (remote mode only) | `Scorer` concurrently scores all rubric fields (Claude Sonnet) then posts ONE atomic batch to `POST /internal/test-runs/{id}/live-scores/`. `LiveScoresView` merges by field key. `_promote_live_scores()` writes final `JudgeScore` rows after call. | `EvalAgent` + `Scorer` (plain async classes) |
+| 3 — Post-Call LLM Judge | Not currently wired in production | `judge.evaluate_result()` exists but is not called from `runner.py` or tasks (`run_judge_task` was removed). Text/audio mode results have no `JudgeScore` rows — only heuristic assertion results. Remote mode gets scores from Tier 2. | n/a (unused) |
 
 ### Agent Types
 
@@ -203,6 +205,9 @@ CLI / external client
 - Empty `voice_id` → malformed ElevenLabs URL → opaque 403; guarded with `voice_id or DEFAULT`.
 - `caller_bot.py` mixes both sides into a mono 16 kHz WAV; `config/recordings.py` serves it.
 - Live listen-in: `/connect` returns an `observer_url` (pre-authed Daily join link, room `max_participants: 10`); `CLI tests run --wait` prints it once the run is `running`. Per-run only (each call is its own ephemeral room).
+- **EvalAgent WAV write cursor:** ElevenLabs streams agent audio chunks as fast as the network allows (all chunks arrive in ~100ms for a 3s utterance). Using arrival time as the WAV offset collapses them into one moment. `_agent_write_cursor` anchors to wall-clock on the first chunk of each turn and advances by `len(pcm) / BYTES_PER_SEC` per chunk — preserving real-time spacing.
+- **EvalBridge concurrency:** Only one `EvalBridge` (`CallClient`) may be active per caller process. Module-level `_daily_bridge_in_use` flag prevents a second concurrent run from creating a second `CallClient` (which would silence the first room and bleed audio). Second run is WS-only (ElevenLabs call still runs; just no Daily relay).
+- **Keepalive strategy (ElevenLabs ConvAI):** Silence keepalive runs only during (a) scoring gap and (b) TTS synthesis — NOT during agent response. Sending keepalive during agent response records user silence simultaneous with agent audio, creating overlap in ElevenLabs' transcript player.
 
 ### Voice Quirks DSL
 
@@ -215,8 +220,8 @@ Parser is in `packages/agent/src/zenlib_agentos/zenlib/reusable_apps/voice_qa/se
 ### LLM Models
 
 - **Agent brain** (`packages/agent/.../voice_qa/services/chat.py`): `claude-haiku-4-5-20251001` — fast/cheap, stateful per `conversation_id`
-- **Live scorer** (`services/voice/eval_agent.py`): `claude-haiku-4-5-20251001` — ScoringSubAgent concurrent scoring
-- **LLM judge** (`packages/agent/.../voice_qa/services/judge.py`): `claude-sonnet-4-6` — scores transcript 0.0–1.0 per rubric field; pass threshold is `>= 0.7`
+- **Live scorer** (`services/voice/eval_agent.py` → `Scorer`): `claude-sonnet-4-6` — scores all rubric fields concurrently after each agent turn (remote mode); one atomic POST per turn
+- **LLM judge** (`packages/agent/.../voice_qa/services/judge.py`): `claude-sonnet-4-6` — text/audio mode only; scores full transcript 0.0–1.0 per rubric field; pass threshold `>= 0.7`
 
 ### Scenario Storage
 
@@ -230,8 +235,9 @@ YAML files live in `scenarios/`. Run `python manage.py load_scenarios` to sync t
 
 Broker and result backend are both Redis. Celery app is `zenapi.celery`. Task types:
 - `run_scenario_task(test_run_id, tenant_id)` (max 3 retries) — one per `TestRun`
-- `run_judge_task(test_result_id, rubric, tenant_id)` (max 2 retries) — dispatched after `TestResult` is created
 - `compute_call_metrics(call_id, tenant_id)` — dispatched from internal `/calls/{id}/end/`
+
+> **`run_judge_task` is gone.** Remote mode uses live scores promoted by `_promote_live_scores()` in `runner.py` (synchronous, after `TestResult` is created). Text/audio mode calls `judge.evaluate_result()` directly from `runner.py` — no separate Celery task needed.
 
 **Important:** All tasks take `tenant_id` (integer PK) and call `context.current_tenant.set(tenant)` before any ORM access. This sets the RLS context for the worker. Always dispatch with `tenant.id` from within a tenant-scoped request.
 

@@ -33,7 +33,7 @@ Shunya is a voice AI QA platform. It tests agents using scenario-driven conversa
 **Three test modes:**
 - `text` — TextCaller injects steps directly into Claude Haiku in-process (no audio stack needed)
 - `audio` — ScenarioCallerBot (separate :8002 service) joins a Daily.co room for real voice conversation with the agent (requires ElevenLabs + Daily keys)
-- `remote` — EvalAgent connects to an ElevenLabs Conversational AI agent WebSocket, drives scenario steps, concurrent ScoringSubAgents score live
+- `remote` — EvalAgent (plain async class) connects to an ElevenLabs Conversational AI agent WebSocket, drives scenario steps; `Scorer` scores all rubric fields concurrently after each turn; EvalBridge relays audio to a Daily.co room for live listen-in
 
 ---
 
@@ -570,3 +570,7 @@ Supported operators: `gt`, `lt`, `gte`, `lte`, `eq`
 | Audio run: agent never responds | Agent isn't hearing the caller | `output_format` must be query param (already fixed) |
 | Audio run: 403 on TTS | `voice_id` empty | Guarded with `voice_id or DEFAULT`; set a valid voice ID |
 | `/recordings/<id>.wav` 404 | No recording (text mode) | Recordings only exist for audio mode runs |
+| Second concurrent remote run's audio bleeds into the first run's Daily room | Two `CallClient` instances in one process — `daily-python` only allows one | By design: second run automatically runs WS-only (no Daily relay). First room is unaffected. Check caller logs for "Another run is already using the Daily audio relay". |
+| ElevenLabs "Audio duration mismatch" warning in transcript player | Gap in `user_audio_chunk` stream during agent response window | Expected: we intentionally stop sending silence during agent speech to prevent transcript overlap. The warning is cosmetic — WAV recording is the authoritative record. |
+| ElevenLabs transcript player shows caller + agent voices overlapping | Old keepalive code was sending silence during agent response | Fixed: keepalive now only runs during scoring + TTS synthesis gaps. Restart `caller` service to pick up changes. |
+| Scenario not found (404) when using web UI | Web UI sends UUID, old lookup was name-only | Fixed in `TestRunViewSet.create()` — tries UUID parse first, falls back to name. |

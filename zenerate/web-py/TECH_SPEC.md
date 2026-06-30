@@ -28,7 +28,7 @@
            │                  │  TTS in (mic), Scribe v2  │
            │                  │  on agent audio, WAV out  │
            │                  │ EvalAgent (remote EL):    │
-           │                  │  ConvAI WS + sub-agents   │
+           │                  │  ConvAI WS + Scorer class │
    ┌───────┴────────┐        └──────────────┬────────────┘
    │   PostgreSQL    │   ┌──────────────┐      │ WebRTC / WS
    │ (single-schema  │   │    Redis     │      ├── Daily room (audio)
@@ -329,8 +329,8 @@ Shunya evaluates test runs at three levels:
 | Tier | When | What | Who | Persisted Where |
 |------|------|------|-----|-----------------|
 | **1 — Heuristic Assertions** | After scenario steps, before TestResult | Checks known assertion names (e.g. `resolved_within_5_turns`, `agent_acknowledges_frustration`) with simple pattern-matching heuristics. Semantic assertions (`no_hallucinated_policy`) pass heuristically — real eval deferred to judge. | `runner._evaluate_assertions()` synchronous | `TestResult.assertion_results` JSONB |
-| **2 — During-Call Live Scores** | After each agent turn (remote mode only) | Concurrent `ScoringSubAgent` instances (one per rubric field) score the partial transcript using Claude Haiku. Scores posted to Django every turn. | `EvalAgent` + `ScoringSubAgent` (WorkerRunner) | `TestRun.live_scores` JSONB |
-| **3 — Post-Call LLM Judge** | After TestResult created | Claude Sonnet scores the full transcript 0.0–1.0 per rubric field; pass ≥ 0.7. This is the authoritative verdict. | `run_judge_task` → `judge.evaluate_result()` | `JudgeScore` rows |
+| **2 — During-Call Live Scores** | After each agent turn (remote mode only) | `Scorer` scores all rubric fields concurrently via `asyncio.gather` (Claude Sonnet), then posts ONE atomic batch to Django per turn. Merge-by-field semantics in `LiveScoresView` prevents concurrent POSTs from race-overwriting. After the last turn, `runner._promote_live_scores()` reads the final batch from DB and writes permanent `JudgeScore` rows. | `EvalAgent` → `Scorer` (plain async class) | `TestRun.live_scores` JSONB → promoted to `JudgeScore` rows |
+| **3 — Post-Call LLM Judge** | Not currently wired in production | `judge.evaluate_result()` exists but is not called from production paths — `run_judge_task` was removed from `tasks/__init__.py` and `runner.py` does not call it. Text/audio mode `TestResult` rows have no `JudgeScore` rows; only heuristic assertion results are populated. Remote mode is scored via Tier 2. | `judge.evaluate_result()` (exists, not called) | — |
 
 ---
 
@@ -494,7 +494,7 @@ zenerate/web-py/
 │   ├── pipeline.py                    # Agent pipeline: Daily→Silero VAD→Scribe v2→Haiku→11Labs
 │   ├── caller_server.py               # FastAPI: /run → ScenarioCallerBot; /remote/connect + /remote/run → EvalAgent
 │   ├── caller_bot.py                  # ScenarioCallerBot: virtual mic/speaker, TTS, Scribe, WAV
-│   ├── eval_agent.py                  # Pipecat WorkerRunner: EvalAgent + EvalBridge + ScoringSubAgent
+│   ├── eval_agent.py                  # Plain async: EvalAgent + EvalBridge + Scorer (no Pipecat infra)
 │   ├── audio_utils.py                 # shared TTS + WAV utilities
 │   ├── config.py                      # voice IDs, defaults
 │   ├── Dockerfile                     # --platform=linux/amd64 python:3.12-slim
@@ -618,6 +618,44 @@ ElevenLabs ignores `output_format` when it's in the **JSON body** and returns **
 ### Live listen-in (observer URL)
 `/connect` mints a third, non-owner **observer token** and returns `observer_url = "{room_url}?t={token}"`; rooms are created with `max_participants: 10` to leave headroom for human observers. The runner calls `AudioCaller._connect()` *before* the scenario starts and persists the link to `TestRun.observer_url` (`URLField`). The CLI prints a join link during a `--wait` poll the moment the run reports `running`. This is per-run live monitoring; an aggregate "all calls" dashboard URL isn't possible because each call is its own ephemeral room.
 
+### Daily bridge concurrency limit (remote mode)
+`daily-python` allows only **one active `CallClient` per OS process**. The same constraint that forced the caller bot into its own process (separate from pipecat) also prevents two concurrent `EvalBridge` instances inside the caller process.
+
+`eval_agent.py` enforces this with a module-level boolean flag `_daily_bridge_in_use`. If a second remote run starts while the first is running:
+- The second run logs a warning and runs **WS-only** (ElevenLabs conversation still works; just no Daily live listen-in).
+- The first run's room is completely unaffected.
+- The flag is released in the `finally` block so the next sequential run gets the Daily relay.
+
+**Why a boolean flag, not an asyncio.Lock?** uvicorn runs with 1 worker (no `--workers` flag in docker-compose), so all concurrent requests share one event loop. asyncio is cooperative multitasking — there is no parallelism between coroutines. A boolean is safe and simpler.
+
+### WAV recording — virtual write cursor for agent audio
+`ScenarioCallerBot` records the caller side by calling `write_frames` on a Daily virtual microphone device. Daily's SDK clocks these frames out in real-time (~20 ms chunks), so using `time.monotonic()` as the WAV offset is accurate.
+
+`EvalAgent` records the agent side by capturing `audio` events from the ElevenLabs Conversational AI WebSocket. ElevenLabs streams all audio chunks for an agent utterance **as fast as the network allows** (typically 50–200 ms for an entire 3-second response). If each chunk is written at its arrival time, they all land at the same offset in the WAV and the entire utterance plays simultaneously (severe overlap).
+
+**Fix:** `_agent_write_cursor` in `EvalAgent.__init__` (type `float`):
+- Anchored to `time.monotonic() - self._call_start_ts` on the **first chunk of each agent turn** — this correctly places the turn at its real wall-clock position in the recording.
+- Advanced by `len(pcm) / BYTES_PER_SEC` for **each subsequent chunk** — places chunks sequentially regardless of how fast they arrived over the network.
+- NOT reset by `_reset_agent_turn()` — it persists across turns so inter-turn silence is preserved in the WAV.
+
+### ElevenLabs ConvAI — silence keepalive strategy
+ElevenLabs Conversational AI expects a continuous stream of `user_audio_chunk` WebSocket events (modelled on a live microphone). Sending nothing for several seconds produces an "Audio duration mismatch" warning and can desync their transcript player.
+
+The keepalive sends `\x00` PCM silence frames. Its timing is critical:
+
+| Window | Keepalive? | Why |
+|---|---|---|
+| Greeting collection | ❌ No | Agent is speaking; sending silence records user audio simultaneous with agent greeting → overlap in EL transcript |
+| TTS synthesis (0.5–2s) | ✅ Yes | No real audio is available; fills the gap to prevent desync |
+| Scoring API call (1–3s) | ✅ Yes | Same — inter-turn dead time from the user's perspective |
+| Agent response window | ❌ No | Agent is speaking; silence here causes EL to record user audio over the agent track, showing overlap in their playback visualizer |
+| Caller speech transmission | ❌ No | Real audio being sent; keepalive would interleave silence frames between speech frames, scrambling pacing |
+
+Implementation lives in `_speak_loop()` in `eval_agent.py` — one keepalive task (`_kp`) that starts/stops at precisely these transition points.
+
+**Remaining limitation:** The gap during agent response (~5–10s with no user audio) still triggers the "Audio duration mismatch" warning. This is the unavoidable trade-off for correct transcript playback. Our WAV recording is the authoritative record.
+
 ### Concurrency limits
 - **Pipecat `/connect`**: max 5 concurrent pipelines (returns 429 beyond that).
 - **Caller `/remote/run`**: max 4 concurrent remote EvalAgent runs (returns 429 beyond that).
+- **EvalBridge (Daily relay)**: max 1 active per caller process (enforced by `_daily_bridge_in_use` flag).
