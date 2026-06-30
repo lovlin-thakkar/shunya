@@ -17,15 +17,14 @@ zenerate/web-py/        ← the entire active codebase
 
 ## What This Is
 
-Shunya is a voice AI QA platform. It has three runtime services:
+Shunya is a voice AI QA platform. It has two runtime services:
 
-1. **Django API** (`zenerate/web-py/apps/api/`) — control plane: multi-tenant REST API (RLS), Celery workers, LLM judge, scenario runner; serves call recordings at `/recordings/<run-id>.wav`
-2. **Pipecat agent server** (`zenerate/web-py/services/voice/server.py`, :8001) — voice runtime: FastAPI + Daily.co WebRTC + ElevenLabs Scribe v2 STT + Claude Haiku + ElevenLabs TTS (the agent under test)
-3. **Caller bot service** (`zenerate/web-py/services/voice/caller_server.py`, :8002) — the synthetic caller (`ScenarioCallerBot`) for audio mode; also runs `EvalAgent` for remote ElevenLabs agent testing; a **separate process** because `daily-python` allows only one `CallClient`/`Daily.init()` per process
+1. **Django API** (`zenerate/web-py/apps/api/`) — control plane: multi-tenant REST API (RLS), Celery workers, post-call LLM judge, scenario runner; serves call recordings at `/recordings/<run-id>.wav`
+2. **Caller service** (`zenerate/web-py/services/voice/caller_server.py`, :8002) — drives remote ElevenLabs Conversational AI agents: `EvalAgent` (WebSocket client), `Scorer` (live per-turn scoring via Claude Sonnet), `EvalBridge` (Daily.co live listen-in); separate process because `daily-python` allows only one `CallClient`/`Daily.init()` per process
 
 Plus a CLI (`zenerate/web-py/cli/`) and a Next.js web UI (`zenerate/web-py/services/web/`).
 
-**Run with Docker.** `docker-compose up` from `zenerate/web-py/` runs the whole stack. The voice services (`pipecat`, `caller`) are pinned to `python:3.12` on `linux/amd64` — `daily-python` has no Python 3.14 wheels and misbehaves on ARM64. For the deeper audio-mode engineering notes, see `TECH_SPEC.md` → "Audio Mode — Engineering Notes".
+**Run with Docker.** `docker-compose up` from `zenerate/web-py/` runs the whole stack. The caller service is pinned to `python:3.12` on `linux/amd64` — `daily-python` has no Python 3.14 wheels and misbehaves on ARM64.
 
 ## Commands
 
@@ -62,17 +61,16 @@ cd zenerate/web-py/apps/api
 uv run pytest
 ```
 
-The conftest uses `tenant_a`/`tenant_b`/`in_tenant` fixtures (RLS-aware). Auth uses `api_key_headers(tenant)` for CLI-style tests or `service_headers(tenant)` for internal pipecat calls.
+The conftest uses `tenant_a`/`tenant_b`/`in_tenant` fixtures (RLS-aware). Auth uses `api_key_headers(tenant)` for CLI-style tests or `service_headers(tenant)` for internal caller service calls.
 
-### Pipecat servers (agent + caller)
+### Caller service
 
-Prefer Docker (`docker-compose up pipecat caller` from `zenerate/web-py/`). For local/manual runs:
+Prefer Docker (`docker-compose up caller` from `zenerate/web-py/`). For local/manual runs:
 
 ```bash
 cd zenerate/web-py/services/voice
 pip install -r requirements.txt        # needs Python 3.12 (NOT 3.14 — daily-python)
-uvicorn server:app --port 8001 --reload         # agent pipeline
-uvicorn caller_server:app --port 8002 --reload  # synthetic caller (separate process)
+uvicorn caller_server:app --port 8002 --reload  # EvalAgent + Scorer + EvalBridge
 ```
 
 ### CLI
@@ -85,7 +83,6 @@ export SHUNYA_BASE_URL=http://localhost:8000  # default
 shunya agents list                    # agents are synced from ElevenLabs, not created
 shunya agents connect <agent-id>      # talk to an agent live (browser)
 shunya tests run <agent-id> --scenario angry_customer_refund --mode text --wait
-shunya tests run <agent-id> --scenario booking_happy_path --mode audio --wait
 shunya tests run-evals <agent-id>     # run all scenarios in parallel
 shunya tests transcript <run-id>      # print conversation transcript
 shunya tests transcript <run-id> --raw  # include Voice Quirks DSL tags
@@ -98,10 +95,10 @@ shunya calls transcript <call-id>
 
 ```bash
 cd zenerate/web-py
-docker compose up    # postgres, redis, django, celery_worker, pipecat (:8001), caller (:8002), web (:3000)
+docker compose up    # postgres, redis, django, celery_worker, caller (:8002), web (:3000)
 ```
 
-**Gotcha:** `celery_worker` does NOT auto-reload on code changes. After editing voice_qa services or tasks, run `docker compose restart celery_worker`. (Django, pipecat, and caller all run with `--reload`.)
+**Gotcha:** `celery_worker` does NOT auto-reload on code changes. After editing voice_qa services or tasks, run `docker compose restart celery_worker`. (Django and caller both run with `--reload`.)
 
 ## Environment Variables
 
@@ -115,11 +112,10 @@ DB_PASSWORD=zen
 DB_HOST=localhost          # docker-compose overrides to "db"
 DB_PORT=5432
 REDIS_URL=redis://localhost:6379/0
-SERVICE_TOKEN=             # shared secret for pipecat→django internal calls; must match DJANGO_SERVICE_TOKEN
+SERVICE_TOKEN=             # shared secret for caller→django internal calls; must match DJANGO_SERVICE_TOKEN
 ANTHROPIC_API_KEY=         # required — AgentChat (Haiku) + LLM judge (Sonnet)
-ELEVENLABS_API_KEY=        # audio mode (Scribe v2 STT + TTS)
-DAILY_API_KEY=             # audio mode (Daily account needs a payment method for SDK joins)
-PIPECAT_SERVER_URL=http://localhost:8001   # docker-compose overrides to http://pipecat:8001
+ELEVENLABS_API_KEY=        # remote mode (ElevenLabs ConvAI + TTS for synthetic caller)
+DAILY_API_KEY=             # remote mode (Daily.co WebRTC room for live listen-in)
 CALLER_SERVER_URL=http://localhost:8002    # docker-compose overrides to http://caller:8002
 RECORDINGS_DIR=/recordings
 ```
@@ -131,7 +127,6 @@ ANTHROPIC_API_KEY=
 ELEVENLABS_API_KEY=
 DAILY_API_KEY=
 DJANGO_API_URL=http://django:8000
-CALLER_SERVICE_URL=http://caller:8002
 DJANGO_SERVICE_TOKEN=      # must match SERVICE_TOKEN in apps/api/.env
 DJANGO_TENANT_ID=1         # integer PK of the active tenant
 ```
@@ -149,7 +144,7 @@ Middleware stack (order is critical):
 
 Auth:
 - CLI → `Authorization: Api-Key <raw_key>` → `TenantAPIKeyAuthentication`
-- Pipecat → `X-Service-Token` + `X-Tenant-Id` → `ServiceTokenAuthentication`
+- Caller service → `X-Service-Token` + `X-Tenant-Id` → `ServiceTokenAuthentication`
 - UI → Knox token `Authorization: Token <knox> <tenant_id>`
 
 ### Request Flow
@@ -159,12 +154,6 @@ CLI / external client
   → Django API (port 8000, DRF, tenant-scoped)
     → Celery task (test runs, LLM judge, metrics/alerts)
       → text mode (BUILTIN agent): AgentChat (Claude Haiku, in-process)
-      → audio mode (BUILTIN agent): AudioCaller → pipecat /connect (:8001) starts the agent pipeline,
-                    then pipecat /caller/run → caller service /run (:8002)
-                      → both bots in one Daily.co room:
-                         agent: Scribe v2 STT → Claude Haiku → ElevenLabs TTS
-                         caller: ElevenLabs TTS in (virtual mic) + Scribe v2 on agent audio (virtual speaker)
-                      → caller writes /recordings/<run-id>.wav
       → remote mode (ELEVENLABS agent): RemoteAudioCaller → caller /remote/run (:8002)
                       → EvalAgent (plain async class) connects to ElevenLabs Conversational AI WebSocket,
                         drives scenario steps; EvalBridge relays audio to Daily room for live listen-in
@@ -176,11 +165,10 @@ CLI / external client
 ### Key Data Flow: Test Run
 
 1. `POST /api/v1/test-runs/` → creates `TestRun`, dispatches `run_scenario_task` Celery task
-2. `run_scenario_task` → calls `runner.run_scenario()` → uses `CallerInterface` (text, audio, or remote mode)
+2. `run_scenario_task` → calls `runner.run_scenario()` → uses `CallerInterface` (text or remote mode)
 3. `TextCaller.send()` → strips Voice Quirks DSL → calls `AgentChat.send()` (Claude Haiku in-process)
-4. Audio mode: `AudioCaller._connect()` → Pipecat `/connect` (provisions Daily room + starts agent pipeline), persists `observer_url` to `TestRun.observer_url`. Then `AudioCaller.run_scenario(...)` → Pipecat `/caller/run` (waits for agent TTS readiness) → caller service `/run`; `ScenarioCallerBot` joins room, speaks steps via ElevenLabs TTS (virtual mic), captures agent via virtual speaker + Scribe v2, writes `/recordings/<run-id>.wav`
-5. Remote mode (ELEVENLABS agents): `RemoteAudioCaller.run_scenario()` → caller service `/remote/connect` + `/remote/run`; `EvalAgent` connects to ElevenLabs Conversational AI WebSocket, drives scenario steps; `Scorer` scores all rubric fields concurrently (Claude Sonnet) after each turn and posts one atomic batch to Django. `_promote_live_scores()` in `runner.py` reads the final batch and writes permanent `JudgeScore` rows after the call.
-6. After all steps: creates `TestResult`, calls `_promote_live_scores()` — for remote mode this writes `JudgeScore` rows from live scores; for text/audio mode this is a no-op (no live scores exist).
+4. Remote mode (ELEVENLABS agents): `RemoteAudioCaller.run_scenario()` → caller service `/remote/connect` + `/remote/run`; `EvalAgent` connects to ElevenLabs Conversational AI WebSocket, drives scenario steps; `Scorer` scores all rubric fields concurrently (Claude Sonnet) after each turn and posts one atomic batch to Django. `_promote_live_scores()` in `runner.py` reads the final batch and writes permanent `JudgeScore` rows after the call.
+5. After all steps: creates `TestResult`, calls `_promote_live_scores()` (returns `True` if remote live scores exist) then `_post_call_score()` — for text mode this calls `score_transcript()` (Claude Sonnet, `judge.py`) synchronously and bulk-creates `JudgeScore` rows; skipped if `_promote_live_scores` returned `True`.
 
 ### 3-Tier Verdict System
 
@@ -188,24 +176,19 @@ CLI / external client
 |------|------|------|-----|
 | 1 — Heuristic Assertions | After scenario steps, before judge | Checks known assertion names (`resolved_within_5_turns`, etc.) in `runner._evaluate_assertions()` | Synchronous in `run_scenario()` |
 | 2 — During-Call Live Scores | After each agent turn (remote mode only) | `Scorer` concurrently scores all rubric fields (Claude Sonnet) then posts ONE atomic batch to `POST /internal/test-runs/{id}/live-scores/`. `LiveScoresView` merges by field key. `_promote_live_scores()` writes final `JudgeScore` rows after call. | `EvalAgent` + `Scorer` (plain async classes) |
-| 3 — Post-Call LLM Judge | Not currently wired in production | `judge.evaluate_result()` exists but is not called from `runner.py` or tasks (`run_judge_task` was removed). Text/audio mode results have no `JudgeScore` rows — only heuristic assertion results. Remote mode gets scores from Tier 2. | n/a (unused) |
+| 3 — Post-Call LLM Judge | After TestResult created (text mode only) | `judge.score_transcript()` called synchronously in `_post_call_score()` inside `run_scenario_task`. Scores full transcript via Claude Sonnet, bulk-creates `JudgeScore` rows. Skipped when Tier 2 live scores already exist (remote mode). | `runner._post_call_score()` |
 
 ### Agent Types
 
 | Type | Target | CallerInterface | Voice Runtime |
 |------|--------|----------------|---------------|
-| `BUILTIN` | Shunya's own Pipecat pipeline (in `services/voice/pipeline.py`) | `TextCaller` (text), `AudioCaller` (audio) | Pipecat agent server (:8001) |
+| `BUILTIN` | In-process Claude Haiku agent (driven by AgentChat) | `TextCaller` | None — in-process |
 | `ELEVENLABS` | Remote ElevenLabs Conversational AI agent | `RemoteAudioCaller` | Caller service (:8002) — EvalAgent connects via ElevenLabs WebSocket |
 
-### Audio mode quick facts (see TECH_SPEC.md for the full notes)
+### Remote mode quick facts
 
-- VAD: standalone `VADProcessor(SileroVADAnalyzer)` **before** the STT (Pipecat 1.4 `DailyParams` has no `vad_analyzer`).
-- ElevenLabs TTS `output_format` must be a **query param** (in the body it returns MP3 → noise to VAD).
-- Daily virtual-mic `write_frames` must be called from the event-loop thread (devices are thread-affine).
-- Empty `voice_id` → malformed ElevenLabs URL → opaque 403; guarded with `voice_id or DEFAULT`.
-- `caller_bot.py` mixes both sides into a mono 16 kHz WAV; `config/recordings.py` serves it.
-- Live listen-in: `/connect` returns an `observer_url` (pre-authed Daily join link, room `max_participants: 10`); `CLI tests run --wait` prints it once the run is `running`. Per-run only (each call is its own ephemeral room).
-- **EvalAgent WAV write cursor:** ElevenLabs streams agent audio chunks as fast as the network allows (all chunks arrive in ~100ms for a 3s utterance). Using arrival time as the WAV offset collapses them into one moment. `_agent_write_cursor` anchors to wall-clock on the first chunk of each turn and advances by `len(pcm) / BYTES_PER_SEC` per chunk — preserving real-time spacing.
+- Live listen-in: `/remote/connect` provisions a Daily room; `observer_url` is persisted to `TestRun`. `CLI tests run --wait` prints it once the run is `running`. Per-run ephemeral room.
+- **EvalAgent WAV write cursor:** ElevenLabs streams agent audio chunks faster than real-time (all chunks arrive in ~100ms for a 3s utterance). Using arrival time as the WAV offset collapses them into one moment. `_agent_write_cursor` anchors to wall-clock on the first chunk of each turn and advances by `len(pcm) / BYTES_PER_SEC` per chunk — preserving real-time spacing.
 - **EvalBridge concurrency:** Only one `EvalBridge` (`CallClient`) may be active per caller process. Module-level `_daily_bridge_in_use` flag prevents a second concurrent run from creating a second `CallClient` (which would silence the first room and bleed audio). Second run is WS-only (ElevenLabs call still runs; just no Daily relay).
 - **Keepalive strategy (ElevenLabs ConvAI):** Silence keepalive runs only during (a) scoring gap and (b) TTS synthesis — NOT during agent response. Sending keepalive during agent response records user silence simultaneous with agent audio, creating overlap in ElevenLabs' transcript player.
 
@@ -221,7 +204,7 @@ Parser is in `packages/agent/src/zenlib_agentos/zenlib/reusable_apps/voice_qa/se
 
 - **Agent brain** (`packages/agent/.../voice_qa/services/chat.py`): `claude-haiku-4-5-20251001` — fast/cheap, stateful per `conversation_id`
 - **Live scorer** (`services/voice/eval_agent.py` → `Scorer`): `claude-sonnet-4-6` — scores all rubric fields concurrently after each agent turn (remote mode); one atomic POST per turn
-- **LLM judge** (`packages/agent/.../voice_qa/services/judge.py`): `claude-sonnet-4-6` — text/audio mode only; scores full transcript 0.0–1.0 per rubric field; pass threshold `>= 0.7`
+- **Post-call judge** (`packages/agent/.../voice_qa/services/judge.py` → `score_transcript()`): `claude-sonnet-4-6` — text mode only; scores full transcript 0.0–1.0 per rubric field synchronously after the run; pass threshold `>= 0.7`
 
 ### Scenario Storage
 
@@ -229,7 +212,7 @@ YAML files live in `scenarios/`. Run `python manage.py load_scenarios` to sync t
 
 ### Internal Endpoints
 
-`/internal/` routes are Pipecat → Django only (not tenant-scoped): `POST /internal/calls/start/`, `POST /internal/calls/{id}/turn/`, `POST /internal/calls/{id}/end/`, `POST /internal/test-runs/{id}/live-scores/`.
+`/internal/` routes are caller service → Django only (not tenant-scoped): `POST /internal/calls/start/`, `POST /internal/calls/{id}/turn/`, `POST /internal/calls/{id}/end/`, `POST /internal/test-runs/{id}/live-scores/`.
 
 ### Celery
 
@@ -237,7 +220,7 @@ Broker and result backend are both Redis. Celery app is `zenapi.celery`. Task ty
 - `run_scenario_task(test_run_id, tenant_id)` (max 3 retries) — one per `TestRun`
 - `compute_call_metrics(call_id, tenant_id)` — dispatched from internal `/calls/{id}/end/`
 
-> **`run_judge_task` is gone.** Remote mode uses live scores promoted by `_promote_live_scores()` in `runner.py` (synchronous, after `TestResult` is created). Text/audio mode calls `judge.evaluate_result()` directly from `runner.py` — no separate Celery task needed.
+> **Scoring is inline, not a separate task.** Remote mode: live scores are promoted by `_promote_live_scores()` (synchronous, after `TestResult` is created). Text mode: `_post_call_score()` calls `judge.score_transcript()` (Claude Sonnet, 30s timeout) directly in `run_scenario_task` — no separate Celery task needed.
 
 **Important:** All tasks take `tenant_id` (integer PK) and call `context.current_tenant.set(tenant)` before any ORM access. This sets the RLS context for the worker. Always dispatch with `tenant.id` from within a tenant-scoped request.
 

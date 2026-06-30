@@ -5,7 +5,7 @@ hand it a scenario, and it drives a full conversation — over text (in-process)
 ElevenLabs ConvAI audio — then scores the transcript live via Claude Sonnet.
 
 This document explains how the pieces fit together, how data flows through a test run, and
-where to find things in the codebase. For operational steps see `RUNBOOK.md`; for the deep
+where to find things in the codebase. For operational steps see the root `README.md`; for the deep
 audio-mode engineering notes see `TECH_SPEC.md`.
 
 ---
@@ -63,10 +63,10 @@ There are **three** moving parts: one control plane, one voice/caller process, a
 
 **Two test modes:**
 
-| Mode | Target | CallerInterface | Voice Runtime |
-|------|--------|----------------|---------------|
-| `text` | BUILTIN (in-process Haiku) | `TextCaller` | None — in-process |
-| `remote` | ELEVENLABS (ConvAI agent) | `RemoteAudioCaller` | Caller :8002 — EvalAgent |
+| Mode | Target agent type | CallerInterface | Voice Runtime |
+|------|-------------------|----------------|---------------|
+| `text` (BUILTIN) | In-process Claude Haiku | `TextCaller` | None — in-process; scored post-call by `judge.score_transcript()` |
+| `remote` (ELEVENLABS) | ElevenLabs ConvAI | `RemoteAudioCaller` | Caller :8002 — EvalAgent; scored live by `Scorer` per turn |
 
 ---
 
@@ -75,8 +75,8 @@ There are **three** moving parts: one control plane, one voice/caller process, a
 | Service          | Process / Port      | Entry point                       | Role                                                            |
 |------------------|---------------------|-----------------------------------|----------------------------------------------------------------|
 | **Django API**   | `:8000`             | `apps/api/src/zenapi/config/`     | Multi-tenant REST control plane (RLS); serves `/recordings/*.wav` |
-| **Celery worker**| —                   | `packages/agent/.../voice_qa/tasks/` | Runs scenarios + metric/alert computation; NOT auto-reloaded |
-| **Caller bot**   | `:8002`             | `services/voice/caller_server.py` | EvalAgent (remote mode): ConvAI WS + Scorer + EvalBridge + WAV |
+| **Celery worker**| —                   | `packages/agent/.../voice_qa/tasks/` | Runs scenarios + inline scoring + metric/alert computation; NOT auto-reloaded |
+| **Caller service**| `:8002`            | `services/voice/caller_server.py` | EvalAgent (remote mode): ConvAI WS + Scorer + EvalBridge + WAV |
 | **Web UI**       | `:3000`             | `services/web/`                   | Next.js frontend for agents, scenarios, test runs               |
 | **CLI**          | local               | `cli/main.py`                     | Thin wrapper over the REST API (`shunya …`)                     |
 | Postgres / Redis | `:5432` / `:6379`   | docker-compose                    | Single-schema RLS DB; Celery broker + result backend           |
@@ -134,7 +134,12 @@ This is the spine of the system. Follow it once and the codebase makes sense.
               computes weighted average, if > 0.7 → updates TestResult.passed.
             • Text mode: live_scores is empty, this is a no-op
 
-5.  Client polls GET /api/v1/test-runs/<id>/  (or `shunya tests run … --wait`)
+5.  After TestResult is created:
+        └─▶ _promote_live_scores() returns True (remote) → writes JudgeScore rows from live_scores
+        └─▶ _post_call_score() skips if True; otherwise calls judge.score_transcript()
+            (Claude Sonnet, 30s timeout) → bulk-creates JudgeScore rows (text mode)
+
+6.  Client polls GET /api/v1/test-runs/<id>/  (or `shunya tests run … --wait`)
         └─▶ reads back TestResult + JudgeScores + assertion_results
         └─▶ remote runs: GET /recordings/<run-id>.wav   (shunya tests audio <run-id>)
         └─▶ live listen-in: once status=running, --wait prints TestRun.observer_url
@@ -208,10 +213,8 @@ all tables, all tenants → isolated by Postgres RLS on tenant_id
 zenerate/web-py/
 ├── docker-compose.yml          # the whole stack: postgres, redis, django, celery_worker, caller, web
 ├── CLAUDE.md                   # agent/contributor instructions (authoritative quick reference)
-├── PRD.md / PLAN.md            # product requirements + build plan
-├── TECH_SPEC.md                # deep audio-mode engineering notes + data models
-├── RUNBOOK.md                  # operational how-to (start/stop, debug, env)
-├── DOCS.md                     # ← you are here (architecture + dev guide)
+├── README.md                   # (repo root) operational how-to (start/stop, debug, env)
+├── ARCHITECTURE_GUIDE.md       # (repo root) ← you are here (architecture + dev guide)
 │
 ├── apps/api/                   # ── CONTROL PLANE (Django) ──────────────────────────────────
 │   ├── manage.py
@@ -253,10 +256,12 @@ zenerate/web-py/
 │           │   ├── serializers/
 │           │   ├── urls/               # agents, scenarios, test_runs, monitoring, internal
 │           │   ├── services/
-│           │   │   ├── runner.py       # run_scenario() orchestrator; _check_assertion()
+│           │   │   ├── runner.py       # run_scenario() orchestrator; _check_assertion(); _post_call_score()
 │           │   │   ├── caller.py       # TextCaller, RemoteAudioCaller; Voice Quirks DSL
 │           │   │   ├── chat.py         # AgentChat — Claude Haiku, in-process (text mode)
+│           │   │   ├── judge.py        # score_transcript() — post-call Claude Sonnet scoring (text mode)
 │           │   │   ├── quirks.py       # Voice Quirks DSL parsing
+│           │   │   ├── ssrf.py         # is_safe_webhook_url() — shared SSRF guard
 │           │   │   └── metrics.py      # post-call metrics + alert evaluation
 │           │   ├── tasks/__init__.py   # Celery: run_scenario_task, compute_call_metrics
 │           │   ├── authentication.py   # TenantAPIKeyAuthentication, ServiceTokenAuthentication
@@ -333,6 +338,7 @@ zenerate/web-py/
 |-----------------------------|--------------------------------|-----------------------------|
 | Agent brain (text mode)     | `claude-haiku-4-5-20251001`    | `voice_qa/services/chat.py` |
 | Live scorer (remote mode)   | `claude-sonnet-4-6`            | `services/voice/eval_agent.py` (`Scorer`) |
+| Post-call judge (text mode) | `claude-sonnet-4-6`            | `voice_qa/services/judge.py` (`score_transcript()`) |
 | Caller TTS (remote mode)    | ElevenLabs TTS                 | `services/voice/audio_utils.py` (`synthesize_tts`) |
 
 ---
