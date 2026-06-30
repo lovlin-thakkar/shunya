@@ -7,7 +7,7 @@ from django.db import connection
 from zenlib.reusable_apps.multitenant import context
 from zenlib.reusable_apps.multitenant.models import Tenant
 
-from ...models import Scenario
+from ...models import Agent, Scenario
 from ...services.quirks import parse_step
 
 
@@ -62,6 +62,7 @@ class Command(BaseCommand):
             steps = [parse_step(s) for s in data.get("steps", [])]
             # Pass tenant explicitly — UUID PKs with default=uuid4 pre-set self.pk,
             # which causes ActivityTenantBaseModel._populate_tenant_if_needed to bail early.
+            agent_names = data.get("agents", [])
             defaults = {
                 "tenant": tenant,
                 "description": data.get("description", ""),
@@ -70,12 +71,16 @@ class Command(BaseCommand):
                 "steps": steps,
                 "assertions": data.get("assertions", []),
                 "rubric": data.get("rubric", {}),
-                "compatible_agents": data.get("agents", []),
             }
             if options["force"]:
                 obj, created = Scenario.objects.update_or_create(name=name, defaults=defaults)
             else:
                 obj, created = Scenario.objects.get_or_create(name=name, defaults=defaults)
+
+            # Sync compatible_agents M2M from the YAML agents list.
+            if created or options["force"]:
+                linked = Agent.objects.filter(name__in=agent_names)
+                obj.compatible_agents.set(linked)
 
             if created:
                 verb = "Created"

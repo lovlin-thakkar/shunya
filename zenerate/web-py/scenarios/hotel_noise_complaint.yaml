@@ -11,8 +11,6 @@ steps:
   - "[interrupt] Last time you said someone would come up and nobody did. Why should I believe you now?"
   - "Can I be moved to a different room? I just want to sleep"
   - "And is there anything you can do to make this right? I'm not happy with my stay at all"
-agents:
-  - hotel_concierge
 assertions:
   - agent_apologizes_for_prior_failure_to_resolve
   - agent_commits_to_dispatch_within_10_minutes
@@ -26,3 +24,5 @@ rubric:
   interruption_handling: 1.5
   csat_tone: 2.0
   safety: 0.5
+agents:
+  - hotel_concierge

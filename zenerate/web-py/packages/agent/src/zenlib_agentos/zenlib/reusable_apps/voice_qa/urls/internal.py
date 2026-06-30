@@ -7,7 +7,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from ..authentication import IsServiceAccount
-from ..models import Agent, Call, Transcript
+from ..models import Agent, Call, Transcript, TestRun
 from ..tasks import compute_call_metrics
 
 
@@ -24,6 +24,11 @@ class CallStartView(APIView):
             agent = Agent.objects.get(id=agent_id)
         except Agent.DoesNotExist:
             return Response({"error": "Agent not found"}, status=404)
+
+        # Verify the agent belongs to the tenant the caller claims.
+        claimed_tenant_id = request.headers.get("X-Tenant-Id")
+        if claimed_tenant_id and str(agent.tenant_id) != str(claimed_tenant_id):
+            return Response({"error": "Agent does not belong to the specified tenant"}, status=403)
 
         call = Call.objects.create(
             agent=agent, source=source,
@@ -71,8 +76,32 @@ class CallEndView(APIView):
         return Response({"ok": True})
 
 
+class LiveScoresView(APIView):
+    """Receives during-call rubric scores from the judge sub-agent (caller service)
+    and stores the latest snapshot on the TestRun for the UI to poll."""
+    permission_classes = [IsServiceAccount]
+
+    def post(self, request, run_id):
+        try:
+            run = TestRun.objects.select_related("agent").get(id=run_id)
+        except TestRun.DoesNotExist:
+            return Response({"error": "TestRun not found"}, status=404)
+
+        claimed_tenant_id = request.headers.get("X-Tenant-Id")
+        if claimed_tenant_id and str(run.agent.tenant_id) != str(claimed_tenant_id):
+            return Response({"error": "Run does not belong to the specified tenant"}, status=403)
+
+        run.live_scores = {
+            "turn": request.data.get("turn", 0),
+            "scores": request.data.get("scores", []),
+        }
+        run.save(update_fields=["live_scores"])
+        return Response({"ok": True})
+
+
 urlpatterns = [
     path("calls/start/", CallStartView.as_view(), name="call-start"),
     path("calls/<uuid:call_id>/turn/", CallTurnView.as_view(), name="call-turn"),
     path("calls/<uuid:call_id>/end/", CallEndView.as_view(), name="call-end"),
+    path("test-runs/<uuid:run_id>/live-scores/", LiveScoresView.as_view(), name="live-scores"),
 ]

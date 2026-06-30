@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { Sidebar } from "@/components/layout/sidebar";
 import { ApiKeyGate } from "@/components/api-key-gate";
+import { ElevenLabsGate } from "@/components/elevenlabs-gate";
 
 export const metadata: Metadata = {
   title: "Shunya — Voice AI QA",
@@ -13,12 +14,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en">
       <body>
         <ApiKeyGate>
-          <div className="flex min-h-screen">
-            <Sidebar />
-            <main className="flex-1 overflow-y-auto min-w-0">
-              {children}
-            </main>
-          </div>
+          <ElevenLabsGate>
+            <div className="flex min-h-screen">
+              <Sidebar />
+              <main className="flex-1 overflow-y-auto min-w-0">
+                {children}
+              </main>
+            </div>
+          </ElevenLabsGate>
         </ApiKeyGate>
       </body>
     </html>

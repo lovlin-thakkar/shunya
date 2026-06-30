@@ -12,6 +12,16 @@ from zenlib.reusable_apps.multitenant import context
 from zenlib.reusable_apps.multitenant.models import Tenant
 
 
+@pytest.fixture(autouse=True)
+def _isolate_tenant_context():
+    """Prevent tenant-context bleed between tests. Celery tasks (and any code that
+    runs run_scenario_task.apply()) call context.current_tenant.set() without
+    resetting — harmless in a worker, but it leaks across tests and breaks RLS
+    scoping for whatever runs next. Clear it after every test."""
+    yield
+    context.current_tenant.set(None)
+
+
 @pytest.fixture
 def tenant_a(db) -> Tenant:
     return Tenant.objects.create(name="Tenant A", slug="tenant-a", service_token="svc-a")
@@ -57,7 +67,7 @@ def api_key_headers(db, in_tenant):
 
     def _headers(tenant: Tenant) -> dict:
         with in_tenant(tenant):
-            raw_key, _ = TenantAPIKey.generate(tenant)
+            _, raw_key = TenantAPIKey.generate(tenant)  # generate() returns (obj, raw)
         return {"HTTP_AUTHORIZATION": f"Api-Key {raw_key}"}
 
     return _headers

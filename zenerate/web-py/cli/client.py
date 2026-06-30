@@ -3,7 +3,13 @@ import json
 import os
 import httpx
 
-BASE_URL = os.environ.get("SHUNYA_API_URL", "http://localhost:8000")
+# SHUNYA_BASE_URL is the canonical env var name (documented in CLAUDE.md).
+# SHUNYA_API_URL is accepted as a legacy alias.
+BASE_URL = (
+    os.environ.get("SHUNYA_BASE_URL")
+    or os.environ.get("SHUNYA_API_URL")
+    or "http://localhost:8000"
+)
 API_KEY = os.environ.get("SHUNYA_API_KEY", "")
 TENANT_HOST = os.environ.get("SHUNYA_TENANT_HOST", "demo.localhost")
 
@@ -50,11 +56,20 @@ def _request(method: str, path: str, *, params=None, json=None) -> httpx.Respons
 
 
 def get(path: str, **params) -> dict:
-    return _request("GET", path, params=params).json()
+    return _request("GET", path, params=params or None).json()
+
+
+def get_bytes(path: str) -> bytes:
+    """Authenticated binary download (e.g. WAV recordings)."""
+    return _request("GET", path).content
 
 
 def post(path: str, data: dict) -> dict:
     return _request("POST", path, json=data).json()
+
+
+def put(path: str, data: dict) -> dict:
+    return _request("PUT", path, json=data).json()
 
 
 def delete(path: str) -> None:

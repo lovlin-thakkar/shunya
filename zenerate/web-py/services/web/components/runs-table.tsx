@@ -6,6 +6,16 @@ import { CheckCircle2, XCircle, Loader2, ArrowRight, Mic, MessageSquare } from "
 import type { TestRun } from "@/lib/types";
 import { formatDistanceToNow } from "@/lib/time";
 
+function parseError(raw: string): string {
+  const body = raw.replace(/^\d{3}:\s*/, "");
+  try {
+    const parsed = JSON.parse(body);
+    return parsed.error ?? parsed.detail ?? parsed.message ?? body;
+  } catch {
+    return body;
+  }
+}
+
 interface Props {
   runs: TestRun[];
   showAgent?: boolean;
@@ -95,6 +105,15 @@ export function RunsTable({ runs, showAgent }: Props) {
 
                 <td className="py-3 pr-5">
                   <StatusBadge status={run.status} />
+                  {run.status === "failed" && run.error_message && (
+                    <p
+                      className="text-xs mt-1 max-w-[200px] truncate"
+                      style={{ color: "var(--red)", opacity: 0.8 }}
+                      title={parseError(run.error_message)}
+                    >
+                      {parseError(run.error_message)}
+                    </p>
+                  )}
                 </td>
 
                 <td className="py-3 pr-5">

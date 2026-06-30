@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import useSWR from "swr";
+import Link from "next/link";
 import { swrFetcher, apiFetch } from "@/lib/api";
 import { Play, PlayCircle, Trash2, Loader2, ChevronDown } from "lucide-react";
 import { RunsTable } from "@/components/runs-table";
@@ -18,9 +19,21 @@ function RunAllModal({
   onClose: () => void;
 }) {
   const [agentId, setAgentId] = useState(agents[0]?.id ?? "");
-  const [mode, setMode] = useState<"text" | "audio">("text");
+  // Agents are remote ElevenLabs voice agents — runs are always audio (the WS
+  // path), so there is no text/audio choice to make.
+  const mode = "audio";
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  // Keep the controlled value pointing at a real agent — agents load async (and
+  // are empty until synced), so the initial useState value can go stale.
+  useEffect(() => {
+    if (agents.length > 0 && !agents.some((a) => a.id === agentId)) {
+      setAgentId(agents[0].id);
+    }
+  }, [agents, agentId]);
+
+  const noAgents = agents.length === 0;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -65,40 +78,29 @@ function RunAllModal({
           {/* Agent */}
           <div>
             <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--ink-3)" }}>Agent</label>
-            <div className="relative">
-              <select
-                value={agentId}
-                onChange={(e) => setAgentId(e.target.value)}
-                className="w-full px-3 py-2.5 rounded-lg text-sm appearance-none outline-none pr-8"
-                style={{ background: "var(--bg)", border: "1px solid var(--border-strong)", color: "var(--ink)" }}
-              >
-                {agents.map((a) => (
-                  <option key={a.id} value={a.id}>{a.name}</option>
-                ))}
-              </select>
-              <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: "var(--ink-3)" }} />
-            </div>
-          </div>
-
-          {/* Mode */}
-          <div>
-            <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--ink-3)" }}>Mode</label>
-            <div className="flex rounded-lg overflow-hidden" style={{ border: "1px solid var(--border-strong)" }}>
-              {(["text", "audio"] as const).map((m) => (
-                <button
-                  key={m}
-                  type="button"
-                  onClick={() => setMode(m)}
-                  className="flex-1 py-2 text-sm font-medium capitalize"
-                  style={{
-                    background: mode === m ? "var(--blue)" : "var(--bg)",
-                    color: mode === m ? "white" : "var(--ink-2)",
-                  }}
+            {noAgents ? (
+              <p className="text-sm px-3 py-2.5 rounded-lg" style={{ background: "var(--bg)", border: "1px solid var(--border)", color: "var(--ink-3)" }}>
+                No agents yet —{" "}
+                <Link href="/agents" className="underline underline-offset-2" style={{ color: "var(--blue)" }} onClick={onClose}>
+                  sync from ElevenLabs
+                </Link>{" "}
+                first.
+              </p>
+            ) : (
+              <div className="relative">
+                <select
+                  value={agentId}
+                  onChange={(e) => setAgentId(e.target.value)}
+                  className="w-full px-3 py-2.5 rounded-lg text-sm appearance-none outline-none pr-8"
+                  style={{ background: "var(--bg)", border: "1px solid var(--border-strong)", color: "var(--ink)" }}
                 >
-                  {m}
-                </button>
-              ))}
-            </div>
+                  {agents.map((a) => (
+                    <option key={a.id} value={a.id}>{a.name}</option>
+                  ))}
+                </select>
+                <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: "var(--ink-3)" }} />
+              </div>
+            )}
           </div>
 
           {error && (
@@ -116,9 +118,9 @@ function RunAllModal({
             </button>
             <button
               type="submit"
-              disabled={loading || !agentId}
+              disabled={loading || noAgents || !agentId}
               className="flex-1 py-2.5 rounded-lg text-sm font-semibold text-white flex items-center justify-center gap-2"
-              style={{ background: "var(--blue)", opacity: loading ? 0.7 : 1 }}
+              style={{ background: "var(--blue)", opacity: loading || noAgents || !agentId ? 0.5 : 1 }}
             >
               {loading ? <Loader2 size={13} className="spin" /> : <PlayCircle size={13} />}
               {loading ? "Starting…" : "Run All"}

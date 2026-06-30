@@ -25,7 +25,14 @@ def run_scenario(test_run_id: str):
     transcript_turns = []
 
     try:
-        if run.mode == TestRun.Mode.AUDIO and hasattr(caller, "run_scenario"):
+        # Both AudioCaller (Pipecat/Daily) and RemoteAudioCaller (ElevenLabs WS)
+        # expose run_scenario; turn-by-turn TextCaller does not. Keying off the
+        # capability lets remote ElevenLabs agents take the audio path even when
+        # the run's mode is "text".
+        if hasattr(caller, "run_scenario"):
+            # Give the during-call judge sub-agent the scenario's rubric.
+            if hasattr(caller, "rubric"):
+                caller.rubric = run.scenario.rubric
             caller._connect()
             if caller.observer_url:
                 run.observer_url = caller.observer_url
@@ -34,6 +41,12 @@ def run_scenario(test_run_id: str):
             transcript_turns = caller.run_scenario(
                 run.scenario.steps, conversation_id, recording_id=str(run.id)
             )
+            # Remote agent may have hung up mid-call — record why for the run page.
+            reason = getattr(caller, "disconnect_reason", "")
+            if reason:
+                run.disconnect_reason = reason
+                run.save(update_fields=["disconnect_reason"])
+                logger.warning(f"TestRun {test_run_id} agent disconnected: {reason}")
         else:
             if getattr(run.agent, "greeting", ""):
                 transcript_turns.append({"speaker": "agent", "text": run.agent.greeting, "ts_ms": 0, "quirks": []})
@@ -65,35 +78,95 @@ def run_scenario(test_run_id: str):
         logger.warning(f"TestRun {test_run_id} was deleted before results could be saved — discarding")
         return
     except Exception as e:
+        import httpx
+        # Transient capacity/overload errors from pipecat — re-raise so the
+        # Celery task can retry with backoff instead of permanently failing the run.
+        if isinstance(e, httpx.HTTPStatusError) and e.response.status_code in (429, 502, 503):
+            logger.warning(f"TestRun {test_run_id} got transient {e.response.status_code} from pipecat — will retry")
+            try:
+                run.status = TestRun.Status.QUEUED
+                run.started_at = None
+                run.save(update_fields=["status", "started_at"])
+            except Exception:
+                pass
+            raise
         logger.exception(f"TestRun {test_run_id} failed: {e}")
         try:
             run.status = TestRun.Status.FAILED
             run.completed_at = timezone.now()
-            run.save(update_fields=["status", "completed_at"])
+            run.error_message = str(e)
+            run.save(update_fields=["status", "completed_at", "error_message"])
         except Exception:
             pass  # run may have been deleted; nothing to do
+
+
+# Assertions evaluated by fast regex/counter checks on the transcript.
+HEURISTIC_ASSERTIONS = frozenset({
+    "resolved_within_5_turns",
+    "resolved_within_6_turns",
+    "agent_acknowledges_frustration",
+    "appointment_confirmed",
+    "correct_date_time_captured",
+    "contact_details_collected",
+    "agent_provides_confirmation_number_or_summary",
+    "agent_asks_for_clarification_when_unclear",
+})
+
+# Assertions that require understanding of intent/policy — evaluated by the LLM judge.
+# runner sets passed=None; judge.evaluate_result fills them in.
+SEMANTIC_ASSERTIONS = frozenset({
+    "no_hallucinated_policy",
+    "agent_does_not_promise_impossible_timeline",
+    "agent_maintains_patience",
+    "agent_does_not_fabricate_account_details",
+})
 
 
 def _evaluate_assertions(assertions, transcript, agent):
     agent_turns = [t["text"].lower() for t in transcript if t["speaker"] == "agent"]
     full_text = " ".join(agent_turns)
-    return [{"assertion": a, "passed": _check_assertion(a, transcript, full_text)} for a in assertions]
+    results = []
+    for a in assertions:
+        if a in SEMANTIC_ASSERTIONS:
+            results.append({"assertion": a, "passed": None, "semantic": True})
+        else:
+            results.append({"assertion": a, "passed": _check_assertion(a, transcript, full_text), "semantic": False})
+    return results
 
 
 def _check_assertion(assertion, transcript, full_agent_text):
-    turn_count = sum(1 for t in transcript if t["speaker"] == "agent")
-    checks = {
-        "resolved_within_5_turns": turn_count <= 5,
-        "resolved_within_6_turns": turn_count <= 6,
-        "agent_acknowledges_frustration": any(w in full_agent_text for w in ["sorry", "understand", "apologize", "frustrat"]),
-        "no_hallucinated_policy": True,
-        "agent_does_not_promise_impossible_timeline": True,
-        "appointment_confirmed": any(w in full_agent_text for w in ["confirmed", "booked", "scheduled", "appointment"]),
-        "correct_date_time_captured": any(w in full_agent_text for w in ["tuesday", "2pm", "2:00"]),
-        "contact_details_collected": True,
-        "agent_provides_confirmation_number_or_summary": any(w in full_agent_text for w in ["confirm", "number", "reference", "summary"]),
-        "agent_asks_for_clarification_when_unclear": any(w in full_agent_text for w in ["could you", "can you", "please repeat", "clarif"]),
-        "agent_does_not_fabricate_account_details": True,
-        "agent_maintains_patience": True,
-    }
-    return checks.get(assertion, True)
+    agent_turns = [t for t in transcript if t["speaker"] == "agent"]
+    caller_turns = [t for t in transcript if t["speaker"] == "caller"]
+    agent_count = len(agent_turns)
+    all_text = " ".join(t["text"].lower() for t in transcript)
+
+    if assertion == "resolved_within_5_turns":
+        return agent_count <= 5
+    if assertion == "resolved_within_6_turns":
+        return agent_count <= 6
+    if assertion == "agent_acknowledges_frustration":
+        return any(w in full_agent_text for w in ["sorry", "understand", "apologize", "frustrat", "hear you", "i see"])
+    if assertion == "appointment_confirmed":
+        return any(w in full_agent_text for w in ["confirmed", "booked", "scheduled", "appointment", "see you"])
+    if assertion == "correct_date_time_captured":
+        import re
+        time_pattern = re.compile(r"\b\d{1,2}(:\d{2})?\s*(am|pm)\b|\btuesday\b|\bwednesday\b|\bmonday\b|\bthursday\b|\bfriday\b")
+        return bool(time_pattern.search(full_agent_text))
+    if assertion == "contact_details_collected":
+        # Check if the agent repeated back any name, email, or phone number from the transcript
+        caller_text = " ".join(t["text"].lower() for t in caller_turns)
+        import re
+        phone = re.search(r"\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b", caller_text)
+        email = re.search(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+", caller_text)
+        if phone and phone.group() in full_agent_text:
+            return True
+        if email and email.group().lower() in full_agent_text:
+            return True
+        # Fall back to checking if agent acknowledged receiving details
+        return any(w in full_agent_text for w in ["got it", "noted", "i have your", "i've noted", "thank you"]) and agent_count >= 2
+    if assertion == "agent_provides_confirmation_number_or_summary":
+        return any(w in full_agent_text for w in ["confirm", "reference", "summary", "to recap", "to confirm", "number"])
+    if assertion == "agent_asks_for_clarification_when_unclear":
+        return any(w in full_agent_text for w in ["could you", "can you", "please repeat", "clarif", "say that again", "didn't catch"])
+    # Unknown assertion — default pass, semantic evaluation not configured
+    return True

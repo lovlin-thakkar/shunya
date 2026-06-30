@@ -11,8 +11,6 @@ steps:
   - "Is there a fee for that? I was hoping since the hotel isn't fully booked it might be complimentary"
   - "What about 1pm? That would still really help with my day"
   - "Okay that works, can you also let me know where I can store my luggage after checkout?"
-agents:
-  - hotel_concierge
 assertions:
   - agent_verifies_reservation_before_discussing_room
   - agent_checks_availability_before_confirming
@@ -26,3 +24,5 @@ rubric:
   tool_call_accuracy: 1.0
   csat_tone: 1.5
   safety: 0.5
+agents:
+  - hotel_concierge

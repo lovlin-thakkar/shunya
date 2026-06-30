@@ -256,3 +256,87 @@ def test_run_scenario_exception_marks_failed(tenant_a, in_tenant, test_run):
 
     test_run.refresh_from_db()
     assert test_run.status == TestRun.Status.FAILED
+
+
+# ---------------------------------------------------------------------------
+# RemoteAudioCaller — remote ElevenLabs agent path
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def remote_agent(tenant_a, in_tenant):
+    with in_tenant(tenant_a):
+        return Agent.objects.create(
+            name="Remote EL Agent",
+            system_prompt="(ignored for remote)",
+            target_type=Agent.TargetType.ELEVENLABS,
+            el_agent_id="agent_abc123",
+        )
+
+
+def test_get_caller_returns_remote_caller(remote_agent):
+    """An ELEVENLABS-target agent dispatches to RemoteAudioCaller regardless of mode."""
+    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.caller import (
+        get_caller, RemoteAudioCaller,
+    )
+    assert isinstance(get_caller("text", remote_agent), RemoteAudioCaller)
+    assert isinstance(get_caller("audio", remote_agent), RemoteAudioCaller)
+
+
+def test_remote_caller_send_raises(remote_agent):
+    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.caller import RemoteAudioCaller
+    with pytest.raises(NotImplementedError):
+        RemoteAudioCaller(remote_agent).send("hi", "conv")
+
+
+def test_remote_caller_run_scenario_posts(remote_agent):
+    """run_scenario POSTs el_agent_id + steps to the caller service and maps the
+    transcript, defaulting missing quirks/ts_ms."""
+    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.caller import RemoteAudioCaller
+
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {"transcript": [{"speaker": "agent", "text": "Hello"}]}
+    mock_resp.raise_for_status = MagicMock()
+
+    caller = RemoteAudioCaller(remote_agent)
+    steps = [{"text": "hi", "raw": "hi", "quirks": []}]
+    with patch("httpx.post", return_value=mock_resp) as mock_post:
+        out = caller.run_scenario(steps, "conv", recording_id="rec-1")
+
+    url, kwargs = mock_post.call_args[0][0], mock_post.call_args[1]
+    assert url.endswith("/remote/run")
+    assert kwargs["json"]["el_agent_id"] == "agent_abc123"
+    assert kwargs["json"]["recording_id"] == "rec-1"
+    assert out == [{"speaker": "agent", "text": "Hello", "quirks": [], "ts_ms": 0}]
+
+
+def test_run_scenario_remote_mode(tenant_a, in_tenant, remote_agent):
+    """End-to-end runner with a remote agent takes the run_scenario (WS) path
+    even when the run mode is text, and completes."""
+    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.runner import run_scenario
+
+    with in_tenant(tenant_a):
+        scenario = Scenario.objects.create(
+            name="remote_scen", yaml_content="x", persona="x",
+            steps=[{"text": "I need a refund", "raw": "I need a refund", "quirks": []}],
+            assertions=["resolved_within_5_turns"],
+        )
+        run = TestRun.objects.create(agent=remote_agent, scenario=scenario, mode=TestRun.Mode.TEXT)
+
+    transcript = [
+        {"speaker": "caller", "text": "I need a refund", "ts_ms": 0, "quirks": []},
+        {"speaker": "agent", "text": "Happy to help with that.", "ts_ms": 1200, "quirks": []},
+    ]
+    with patch(
+        "zenlib_agentos.zenlib.reusable_apps.voice_qa.services.caller.RemoteAudioCaller.run_scenario",
+        return_value=transcript,
+    ) as mock_run, \
+         patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.tasks.run_judge_task") as mock_judge:
+        mock_judge.delay = MagicMock()
+        with in_tenant(tenant_a):
+            run_scenario(str(run.id))
+
+    assert mock_run.called
+    run.refresh_from_db()
+    assert run.status == TestRun.Status.COMPLETED
+    result = TestResult.objects.get(test_run=run)
+    assert any(t["speaker"] == "agent" for t in result.transcript)

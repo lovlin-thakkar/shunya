@@ -6,7 +6,9 @@ import { apiFetch } from "@/lib/api";
 import type { Scenario } from "@/lib/types";
 
 interface Props {
+  agents: { id: string; name: string }[];
   onClose: () => void;
+  scenario?: import("@/lib/types").Scenario; // when set, modal is in edit mode
 }
 
 // Known assertions with human-readable descriptions
@@ -304,12 +306,30 @@ function RubricSection({
 
 // ── Main modal ────────────────────────────────────────────────────────────────
 
-export function NewScenarioModal({ onClose }: Props) {
-  const [name, setName] = useState("");
-  const [persona, setPersona] = useState("");
-  const [steps, setSteps] = useState<string[]>(["", ""]);
-  const [assertions, setAssertions] = useState<string[]>([]);
-  const [rubricFields, setRubricFields] = useState<{ key: string; weight: string }[]>([]);
+export function NewScenarioModal({ agents, onClose, scenario }: Props) {
+  const isEdit = Boolean(scenario);
+
+  // Pre-populate from existing scenario when editing
+  const [name, setName] = useState(scenario?.name ?? "");
+  const [persona, setPersona] = useState(scenario?.persona ?? "");
+  const [steps, setSteps] = useState<string[]>(
+    scenario?.steps?.length
+      ? scenario.steps.map((s) => (typeof s === "string" ? s : s.text ?? s.raw ?? ""))
+      : ["", ""]
+  );
+  const [assertions, setAssertions] = useState<string[]>(scenario?.assertions ?? []);
+  const [rubricFields, setRubricFields] = useState<{ key: string; weight: string }[]>(
+    scenario?.rubric
+      ? Object.entries(scenario.rubric).map(([k, v]) => ({ key: k, weight: String(v) }))
+      : []
+  );
+  // Map agent names → IDs for pre-population in edit mode
+  const [compatibleAgentIds, setCompatibleAgentIds] = useState<string[]>(() => {
+    if (!scenario?.compatible_agents?.length) return [];
+    return agents
+      .filter((a) => scenario.compatible_agents!.includes(a.name))
+      .map((a) => a.id);
+  });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -333,8 +353,9 @@ export function NewScenarioModal({ onClose }: Props) {
     setLoading(true);
     setError("");
     try {
-      await apiFetch<Scenario>("/api/v1/scenarios/", {
-        method: "POST",
+      const url = isEdit ? `/api/v1/scenarios/${scenario!.id}/` : "/api/v1/scenarios/";
+      await apiFetch<Scenario>(url, {
+        method: isEdit ? "PATCH" : "POST",
         body: JSON.stringify({
           name: name.trim(),
           persona: persona.trim(),
@@ -342,11 +363,12 @@ export function NewScenarioModal({ onClose }: Props) {
           assertions,
           rubric,
           description: "",
+          compatible_agent_ids: compatibleAgentIds,
         }),
       });
       onClose();
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to create scenario");
+      setError(e instanceof Error ? e.message : isEdit ? "Failed to update scenario" : "Failed to create scenario");
     } finally {
       setLoading(false);
     }
@@ -372,9 +394,11 @@ export function NewScenarioModal({ onClose }: Props) {
           style={{ borderBottom: "1px solid var(--border)" }}
         >
           <div>
-            <h2 className="font-semibold text-[15px]" style={{ color: "var(--ink)" }}>New Scenario</h2>
+            <h2 className="font-semibold text-[15px]" style={{ color: "var(--ink)" }}>
+              {isEdit ? "Edit Scenario" : "New Scenario"}
+            </h2>
             <p className="text-xs mt-0.5" style={{ color: "var(--ink-3)" }}>
-              Write a conversation script for a synthetic caller
+              {isEdit ? `Editing "${scenario!.name}"` : "Write a conversation script for a synthetic caller"}
             </p>
           </div>
           <button
@@ -555,6 +579,45 @@ export function NewScenarioModal({ onClose }: Props) {
               </div>
             </div>
 
+            {/* Compatible agents */}
+            {agents.length > 0 && (
+              <div>
+                <label className="block text-xs font-medium mb-1" style={{ color: "var(--ink-2)" }}>
+                  Compatible agents
+                </label>
+                <p className="text-xs mb-2" style={{ color: "var(--ink-3)" }}>
+                  Leave empty to allow any agent. Select specific agents to restrict.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {agents.map((a) => {
+                    const selected = compatibleAgentIds.includes(a.id);
+                    return (
+                      <button
+                        key={a.id}
+                        type="button"
+                        onClick={() =>
+                          setCompatibleAgentIds(
+                            selected
+                              ? compatibleAgentIds.filter((id) => id !== a.id)
+                              : [...compatibleAgentIds, a.id]
+                          )
+                        }
+                        className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium"
+                        style={{
+                          border: `1px solid ${selected ? "var(--blue)" : "var(--border-strong)"}`,
+                          background: selected ? "var(--blue-bg)" : "transparent",
+                          color: selected ? "var(--blue)" : "var(--ink-3)",
+                        }}
+                      >
+                        {selected && <Check size={10} />}
+                        {a.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Pass/fail checks */}
             <div>
               <label className="block text-xs font-medium mb-1" style={{ color: "var(--ink-2)" }}>
@@ -589,7 +652,7 @@ export function NewScenarioModal({ onClose }: Props) {
             style={{ background: "var(--blue)", opacity: loading || !name.trim() ? 0.5 : 1 }}
           >
             {loading && <Loader2 size={13} className="spin" />}
-            {loading ? "Creating…" : "Create Scenario"}
+            {loading ? (isEdit ? "Saving…" : "Creating…") : isEdit ? "Save Changes" : "Create Scenario"}
           </button>
           <button
             type="button"

@@ -17,8 +17,9 @@ def run_scenario_task(self, test_run_id: str, tenant_id: int):
         # No point retrying — just discard.
         return
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 429:
-            # Pipecat pipeline capacity full — back off linearly then retry.
+        if exc.response.status_code in (429, 502, 503):
+            # 429 = pipecat at capacity; 502/503 = Daily.co overloaded.
+            # Both mean "try again later" — back off linearly.
             delay = min(30 + self.request.retries * 30, 120)
             raise self.retry(exc=exc, countdown=delay)
         if self.request.retries < 3:

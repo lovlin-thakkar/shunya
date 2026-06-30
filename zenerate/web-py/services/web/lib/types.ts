@@ -5,9 +5,17 @@ export interface Agent {
   system_prompt: string;
   greeting: string;
   voice_id: string;
+  target_type: "builtin" | "elevenlabs";
+  el_agent_id: string;
+  dynamic_variables: Record<string, string>;
   status: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface ElevenLabsIntegration {
+  configured: boolean;
+  key_hint: string;
 }
 
 export interface ScenarioStep {
@@ -44,11 +52,18 @@ export interface TranscriptTurn {
   quirks?: { tag: string; value: string }[];
 }
 
+export interface AssertionResult {
+  assertion: string;
+  passed: boolean | null;
+  semantic: boolean;
+  reasoning?: string;
+}
+
 export interface TestResult {
   id: string;
   passed: boolean;
   transcript: TranscriptTurn[];
-  assertion_results: Record<string, boolean>;
+  assertion_results: AssertionResult[];
   scores: JudgeScore[];
   created_at: string;
 }
@@ -65,7 +80,22 @@ export interface TestRun {
   completed_at: string | null;
   created_at: string;
   observer_url?: string;
+  error_message?: string;
+  disconnect_reason?: string;
+  live_scores?: LiveScores;
   result?: TestResult;
+}
+
+export interface LiveScore {
+  field: string;
+  score: number;
+  passed: boolean;
+  reasoning: string;
+}
+
+export interface LiveScores {
+  turn?: number;
+  scores?: LiveScore[];
 }
 
 export interface PaginatedResponse<T> {

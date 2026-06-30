@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { X, Play, Loader2, Mic, MessageSquare } from "lucide-react";
+import Link from "next/link";
+import { X, Play, Loader2 } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 import type { Agent, Scenario, TestRun } from "@/lib/types";
 
@@ -16,7 +17,8 @@ interface Props {
 export function NewRunModal({ agents, scenarios, defaultAgentId, onClose }: Props) {
   const router = useRouter();
   const [agentId, setAgentId] = useState(defaultAgentId ?? agents[0]?.id ?? "");
-  const [mode, setMode] = useState<"text" | "audio">("text");
+  // Remote ElevenLabs agents are voice-only — runs always use the audio WS path.
+  const mode = "audio";
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -31,6 +33,22 @@ export function NewRunModal({ agents, scenarios, defaultAgentId, onClose }: Prop
   }, [scenarios, selectedAgent]);
 
   const [scenarioName, setScenarioName] = useState(() => compatibleScenarios[0]?.name ?? "");
+
+  const noAgents = agents.length === 0;
+
+  // Agents/scenarios load async (and agents are empty until synced), so the
+  // initial useState values can go stale — keep both selects on valid options.
+  useEffect(() => {
+    if (agents.length > 0 && !agents.some((a) => a.id === agentId)) {
+      setAgentId(agents[0].id);
+    }
+  }, [agents, agentId]);
+
+  useEffect(() => {
+    if (compatibleScenarios.length > 0 && !compatibleScenarios.some((s) => s.name === scenarioName)) {
+      setScenarioName(compatibleScenarios[0].name);
+    }
+  }, [compatibleScenarios, scenarioName]);
 
   function handleAgentChange(newId: string) {
     setAgentId(newId);
@@ -119,9 +137,19 @@ export function NewRunModal({ agents, scenarios, defaultAgentId, onClose }: Prop
             <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--ink-2)" }}>
               Agent
             </label>
-            <select value={agentId} onChange={(e) => handleAgentChange(e.target.value)} style={selectStyle}>
-              {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-            </select>
+            {noAgents ? (
+              <p className="text-sm px-3 py-2.5 rounded-lg" style={{ background: "var(--bg)", border: "1px solid var(--border)", color: "var(--ink-3)" }}>
+                No agents yet —{" "}
+                <Link href="/agents" className="underline underline-offset-2" style={{ color: "var(--blue)" }} onClick={onClose}>
+                  sync from ElevenLabs
+                </Link>{" "}
+                first.
+              </p>
+            ) : (
+              <select value={agentId} onChange={(e) => handleAgentChange(e.target.value)} style={selectStyle}>
+                {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
+            )}
           </div>
 
           {/* Scenario */}
@@ -147,33 +175,6 @@ export function NewRunModal({ agents, scenarios, defaultAgentId, onClose }: Prop
             )}
           </div>
 
-          {/* Mode */}
-          <div>
-            <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--ink-2)" }}>
-              Mode
-            </label>
-            <div className="flex gap-2">
-              {(["text", "audio"] as const).map((m) => {
-                const active = mode === m;
-                return (
-                  <button
-                    key={m}
-                    onClick={() => setMode(m)}
-                    className="flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-medium"
-                    style={{
-                      border: `1px solid ${active ? "var(--blue)" : "var(--border-strong)"}`,
-                      background: active ? "var(--blue-bg)" : "transparent",
-                      color: active ? "var(--blue)" : "var(--ink-2)",
-                    }}
-                  >
-                    {m === "audio" ? <Mic size={13} /> : <MessageSquare size={13} />}
-                    {m === "text" ? "Text" : "Audio"}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
           {error && (
             <p className="text-xs" style={{ color: "var(--red)" }}>{error}</p>
           )}
@@ -185,11 +186,11 @@ export function NewRunModal({ agents, scenarios, defaultAgentId, onClose }: Prop
         >
           <button
             onClick={submit}
-            disabled={loading || compatibleScenarios.length === 0}
+            disabled={loading || noAgents || compatibleScenarios.length === 0}
             className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-semibold text-white"
             style={{
               background: "var(--blue)",
-              opacity: loading || compatibleScenarios.length === 0 ? 0.5 : 1,
+              opacity: loading || noAgents || compatibleScenarios.length === 0 ? 0.5 : 1,
             }}
           >
             {loading ? <Loader2 size={14} className="spin" /> : <Play size={13} />}
