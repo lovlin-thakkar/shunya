@@ -134,59 +134,33 @@ class RemoteRunRequest(BaseModel):
 async def remote_run(req: RemoteRunRequest):
     """Drive a scenario against a customer's deployed ElevenLabs agent.
 
-    When room_url + room_token are present (provisioned by /remote/connect), uses
-    ScenarioRemoteCallerDailyBot which mirrors both audio streams into the Daily room
-    so observers can listen live via the observer_url. Falls back to the plain
-    WebSocket bot when no room is provided."""
+    Uses the Pipecat-powered EvalAgent which joins the Daily room as
+    "Shunya Eval" and bridges audio between the room and the ElevenLabs
+    Conversational AI WebSocket. Scoring sub-agents run concurrently."""
     global _active_remote
     if _active_remote >= MAX_CONCURRENT_REMOTE:
         logger.warning("Remote caller at capacity (%d/%d), rejecting", _active_remote, MAX_CONCURRENT_REMOTE)
         raise HTTPException(status_code=429, detail="Caller at capacity. Retry shortly.")
     _active_remote += 1
 
-    judge = None
-    if req.run_id:
-        from judge_subagent import LiveJudgeSubAgent
-        persona = (req.steps[0].get("persona", "") if req.steps else "")
-        judge = LiveJudgeSubAgent(
+    try:
+        from eval_agent import run_eval_agent
+        result = await run_eval_agent(
+            el_agent_id=req.el_agent_id,
+            steps=req.steps,
+            room_url=req.room_url or "",
+            room_token=req.room_token or "",
+            agent_api_key=req.agent_api_key,
+            tts_api_key=os.environ.get("ELEVENLABS_API_KEY", ""),
+            dynamic_variables=req.dynamic_variables,
+            caller_voice_id=req.voice_id,
+            recording_id=req.recording_id,
             run_id=req.run_id,
             tenant_id=req.tenant_id,
             rubric=req.rubric,
-            anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
             django_url=os.environ.get("DJANGO_API_URL", "http://django:8000"),
             service_token=_SERVICE_TOKEN,
-            persona=persona,
         )
-
-    if req.room_url and req.room_token:
-        from remote_caller_daily_bot import ScenarioRemoteCallerDailyBot
-        bot = ScenarioRemoteCallerDailyBot(
-            el_agent_id=req.el_agent_id,
-            steps=req.steps,
-            room_url=req.room_url,
-            room_token=req.room_token,
-            agent_api_key=req.agent_api_key,
-            dynamic_variables=req.dynamic_variables,
-            tts_api_key=os.environ.get("ELEVENLABS_API_KEY", ""),
-            caller_voice_id=req.voice_id,
-            recording_id=req.recording_id,
-            judge=judge,
-        )
-    else:
-        from remote_caller_bot import ScenarioRemoteCallerBot
-        bot = ScenarioRemoteCallerBot(
-            el_agent_id=req.el_agent_id,
-            steps=req.steps,
-            agent_api_key=req.agent_api_key,
-            dynamic_variables=req.dynamic_variables,
-            tts_api_key=os.environ.get("ELEVENLABS_API_KEY", ""),
-            caller_voice_id=req.voice_id,
-            recording_id=req.recording_id,
-            judge=judge,
-        )
-
-    try:
-        transcript = await bot.run()
     except (ConnectionRefusedError, httpx.ConnectError, OSError) as e:
         logger.warning(f"Remote caller transient failure: {e}")
         raise HTTPException(status_code=503, detail=f"Transient connection failure: {e}")
@@ -195,11 +169,7 @@ async def remote_run(req: RemoteRunRequest):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         _active_remote -= 1
-    return JSONResponse({
-        "transcript": transcript,
-        "recording_file": bot.recording_file,
-        "closed_reason": bot.closed_reason,
-    })
+    return JSONResponse(result)
 
 
 @app.get("/health")
