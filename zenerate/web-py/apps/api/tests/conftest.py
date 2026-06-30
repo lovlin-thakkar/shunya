@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from contextlib import contextmanager
 
 import pytest
@@ -24,12 +25,12 @@ def _isolate_tenant_context():
 
 @pytest.fixture
 def tenant_a(db) -> Tenant:
-    return Tenant.objects.create(name="Tenant A", slug="tenant-a")
+    return Tenant.objects.create(name="Tenant A", slug="tenant-a", service_token=secrets.token_hex(16))
 
 
 @pytest.fixture
 def tenant_b(db) -> Tenant:
-    return Tenant.objects.create(name="Tenant B", slug="tenant-b")
+    return Tenant.objects.create(name="Tenant B", slug="tenant-b", service_token=secrets.token_hex(16))
 
 
 @pytest.fixture
