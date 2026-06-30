@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from ..models import TestRun, TestResult, JudgeScore
 from .caller import get_caller
+from .judge import score_transcript
 from zenlib.reusable_apps.multitenant import context
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,7 @@ def run_scenario(test_run_id: str):
         )
 
         _promote_live_scores(run, test_result)
+        _post_call_score(run, test_result)
 
         run.status = TestRun.Status.COMPLETED
         run.completed_at = timezone.now()
@@ -151,6 +153,48 @@ def _promote_live_scores(run: TestRun, test_result: TestResult):
 
     logger.info(
         "Promoted %d live scores to JudgeScore rows for TestResult %s (weighted avg %.2f)",
+        len(judge_scores), test_result.id, weighted_avg,
+    )
+
+
+def _post_call_score(run: TestRun, test_result: TestResult):
+    """Score the full transcript with Claude Sonnet after the call ends.
+
+    Only runs for text mode — remote mode already has scores from live scoring
+    promoted by _promote_live_scores(). Runs synchronously inside run_scenario_task
+    so scores are ready before the task completes.
+    """
+    run.refresh_from_db(fields=["live_scores"])
+    if (run.live_scores or {}).get("scores"):
+        return  # remote mode: live scores already promoted, nothing to do
+
+    rubric = run.scenario.rubric or {}
+    scores = score_transcript(test_result.transcript, rubric)
+    if not scores:
+        return
+
+    tenant = context.current_tenant.get()
+    judge_scores = [
+        JudgeScore(
+            test_result=test_result,
+            field=s["field"],
+            score=s["score"],
+            reasoning=s["reasoning"],
+            passed=s["passed"],
+            tenant=tenant,
+        )
+        for s in scores
+    ]
+    JudgeScore.objects.bulk_create(judge_scores, ignore_conflicts=True)
+
+    weights = [rubric.get(js.field, 1.0) for js in judge_scores]
+    total_weight = sum(weights) or 1.0
+    weighted_avg = sum(js.score * w for js, w in zip(judge_scores, weights)) / total_weight
+    test_result.passed = test_result.passed and weighted_avg >= 0.7
+    test_result.save(update_fields=["passed"])
+
+    logger.info(
+        "Post-call scored %d fields for TestResult %s (weighted avg %.2f)",
         len(judge_scores), test_result.id, weighted_avg,
     )
 
