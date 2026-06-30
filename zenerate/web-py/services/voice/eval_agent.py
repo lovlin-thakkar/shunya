@@ -10,6 +10,7 @@ Pipecat-worker-based reimplementation of the remote ElevenLabs agent caller.
 Replaces the earlier standalone WS+Daily relay bot approach with a proper
 WorkerRunner + BaseWorker architecture and concurrent scoring sub-agents.
 """
+
 import asyncio
 import base64
 import json
@@ -60,13 +61,17 @@ class ScoringSubAgent(BaseWorker):
 
     def __init__(self, name: str, anthropic_api_key: str, persona: str = ""):
         super().__init__(name=name)
-        self._client = AsyncAnthropic(api_key=anthropic_api_key) if anthropic_api_key else None
+        self._client = (
+            AsyncAnthropic(api_key=anthropic_api_key) if anthropic_api_key else None
+        )
         self._persona = persona or ""
 
     @job(name="score")
     async def on_score(self, message):
         if not self._client:
-            await self.send_job_response(message.job_id, {"error": "no api key"}, status="FAILED")
+            await self.send_job_response(
+                message.job_id, {"error": "no api key"}, status="FAILED"
+            )
             return
         fields = message.payload.get("fields", [])
         transcript = message.payload.get("transcript", [])
@@ -75,7 +80,9 @@ class ScoringSubAgent(BaseWorker):
             await self.send_job_response(message.job_id, scores)
         except Exception as e:
             logger.warning("Scoring failed: %s", e)
-            await self.send_job_response(message.job_id, {"error": str(e)}, status="FAILED")
+            await self.send_job_response(
+                message.job_id, {"error": str(e)}, status="FAILED"
+            )
 
     async def _score(self, transcript: list[dict], fields: list[str]) -> dict:
         convo = "\n".join(
@@ -142,7 +149,10 @@ class EvalBridge:
 
         mic_name = f"eval-mic-{self._device_tag}"
         self._mic = Daily.create_microphone_device(
-            mic_name, sample_rate=16000, channels=1, non_blocking=True,
+            mic_name,
+            sample_rate=16000,
+            channels=1,
+            non_blocking=True,
         )
         self._call_client = CallClient(event_handler=Handler())
         self._call_client.join(
@@ -150,7 +160,10 @@ class EvalBridge:
             meeting_token=self.room_token,
             client_settings={
                 "inputs": {
-                    "microphone": {"isEnabled": True, "settings": {"deviceId": mic_name}},
+                    "microphone": {
+                        "isEnabled": True,
+                        "settings": {"deviceId": mic_name},
+                    },
                     "camera": {"isEnabled": False},
                 },
             },
@@ -240,14 +253,19 @@ class EvalAgent(BaseWorker):
 
     async def _run(self):
         try:
-            fields = [f for f in self._rubric] if self._rubric else \
-                     ["instruction_following", "goal_completion", "csat_tone", "safety"]
-            persona = (self.steps[0].get("persona", "") if self.steps else "")
+            fields = (
+                [f for f in self._rubric]
+                if self._rubric
+                else ["instruction_following", "goal_completion", "csat_tone", "safety"]
+            )
+            persona = self.steps[0].get("persona", "") if self.steps else ""
             anthro_key = os.environ.get("ANTHROPIC_API_KEY", "")
 
             # Optional Daily bridge — only when room_url provided
             if self.room_url and self.room_token:
-                self._bridge = EvalBridge(self.room_url, self.room_token, device_tag=uuid.uuid4().hex[:6])
+                self._bridge = EvalBridge(
+                    self.room_url, self.room_token, device_tag=uuid.uuid4().hex[:6]
+                )
                 await self._bridge.join()
             else:
                 logger.info("No Daily room — running WS-only (no live listen-in)")
@@ -346,7 +364,9 @@ class EvalAgent(BaseWorker):
                     text = msg.get("agent_response_event", {}).get("agent_response", "")
                     if text:
                         self._agent_text = (
-                            (self._agent_text + " " + text).strip() if self._agent_text else text.strip()
+                            (self._agent_text + " " + text).strip()
+                            if self._agent_text
+                            else text.strip()
                         )
                     continue
                 if mtype == "interruption":
@@ -362,9 +382,14 @@ class EvalAgent(BaseWorker):
             quirks = [q.get("tag", "") for q in step.get("quirks", [])]
 
             caller_ts_ms = int((time.monotonic() - self._call_start_ts) * 1000)
-            self._transcript.append({
-                "speaker": "caller", "text": clean, "ts_ms": caller_ts_ms, "quirks": quirks,
-            })
+            self._transcript.append(
+                {
+                    "speaker": "caller",
+                    "text": clean,
+                    "ts_ms": caller_ts_ms,
+                    "quirks": quirks,
+                }
+            )
             logger.info("Caller at +%dms: %s", caller_ts_ms, clean[:60])
 
             self._reset_agent_turn()
@@ -390,19 +415,41 @@ class EvalAgent(BaseWorker):
         if self._bridge:
             await self._bridge.send_audio(pcm)
         for i in range(0, len(pcm), SEND_FRAME_BYTES):
-            frame = pcm[i:i + SEND_FRAME_BYTES]
-            await self._ws.send(json.dumps({
-                "user_audio_chunk": base64.b64encode(frame).decode("ascii"),
-            }))
+            frame = pcm[i : i + SEND_FRAME_BYTES]
+            await self._ws.send(
+                json.dumps(
+                    {
+                        "user_audio_chunk": base64.b64encode(frame).decode("ascii"),
+                    }
+                )
+            )
             await asyncio.sleep(len(frame) / BYTES_PER_SEC)
-        await self._ws.send(json.dumps({
-            "user_audio_chunk": base64.b64encode(b"\x00" * TRAILING_SILENCE_BYTES).decode("ascii"),
-        }))
+        await self._ws.send(
+            json.dumps(
+                {
+                    "user_audio_chunk": base64.b64encode(
+                        b"\x00" * TRAILING_SILENCE_BYTES
+                    ).decode("ascii"),
+                }
+            )
+        )
 
-    async def _collect_agent_turn(self, start_timeout: float, is_greeting: bool = False) -> str:
+    async def _collect_agent_turn(
+        self, start_timeout: float, is_greeting: bool = False
+    ) -> str:
+        # Clear at the last moment so stale text from a previous turn that
+        # arrived late (between _reset_agent_turn and here) is not picked up
+        # as a response to the current step, which would cause the caller to
+        # speak multiple steps without actually waiting for the agent.
+        self._agent_text = ""
+
         deadline = time.monotonic() + start_timeout
         while time.monotonic() < deadline:
-            ready = (self._agent_audio_started or self._agent_text) if is_greeting else bool(self._agent_text)
+            ready = (
+                (self._agent_audio_started or self._agent_text)
+                if is_greeting
+                else bool(self._agent_text)
+            )
             if ready:
                 break
             await asyncio.sleep(0.05)
@@ -425,8 +472,11 @@ class EvalAgent(BaseWorker):
     async def _dispatch_scoring(self):
         if not self._scorers:
             return
-        fields = list(self._rubric.keys()) if self._rubric else \
-                 ["instruction_following", "goal_completion", "csat_tone", "safety"]
+        fields = (
+            list(self._rubric.keys())
+            if self._rubric
+            else ["instruction_following", "goal_completion", "csat_tone", "safety"]
+        )
         snapshot = list(self._transcript)
 
         async def _score_one(scorer: ScoringSubAgent, field: str):
@@ -458,12 +508,14 @@ class EvalAgent(BaseWorker):
                 score = max(0.0, min(1.0, float(entry.get("score", 0.0))))
             except (TypeError, ValueError):
                 continue
-            normalized.append({
-                "field": field,
-                "score": round(score, 2),
-                "reasoning": str(entry.get("reason", ""))[:200],
-                "passed": score >= PASS_THRESHOLD,
-            })
+            normalized.append(
+                {
+                    "field": field,
+                    "score": round(score, 2),
+                    "reasoning": str(entry.get("reason", ""))[:200],
+                    "passed": score >= PASS_THRESHOLD,
+                }
+            )
         if not normalized:
             return
         try:
@@ -484,9 +536,14 @@ class EvalAgent(BaseWorker):
     def _append_agent_turn(self, text: str):
         start = self._agent_speech_start_ts or time.monotonic()
         ts = int((start - self._call_start_ts) * 1000)
-        self._transcript.append({
-            "speaker": "agent", "text": text, "ts_ms": ts, "quirks": [],
-        })
+        self._transcript.append(
+            {
+                "speaker": "agent",
+                "text": text,
+                "ts_ms": ts,
+                "quirks": [],
+            }
+        )
 
     def _reset_agent_turn(self):
         self._agent_text = ""
