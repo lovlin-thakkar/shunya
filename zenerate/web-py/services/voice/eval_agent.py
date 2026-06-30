@@ -21,7 +21,7 @@ import httpx
 import websockets
 from anthropic import AsyncAnthropic
 from pipecat.frames.frames import AudioRawFrame
-from pipecat.pipeline.base_worker import BaseWorker
+from pipecat.workers.base_worker import BaseWorker
 from pipecat.pipeline.job_decorator import job
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineWorker, PipelineParams
