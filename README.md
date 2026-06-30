@@ -1,3 +1,12 @@
+# Shunya
+
+[![CI](https://github.com/lovlin-thakkar/shunya/actions/workflows/ci.yml/badge.svg)](https://github.com/lovlin-thakkar/shunya/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/lovlin-thakkar/shunya/branch/main/graph/badge.svg)](https://codecov.io/gh/lovlin-thakkar/shunya)
+
+Voice AI QA platform — run automated scenarios against voice agents, score results with an LLM judge.
+
+---
+
 ## Generating api key to use CLI locally
 
 ### Option 1 — use uv run (recommended)        

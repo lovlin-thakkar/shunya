@@ -21,4 +21,6 @@ rubric:
   interruption_handling: 1.5
   csat_tone: 1.0
   safety: 1.0
-
+agents:
+  - demo_support_agent
+  - ecommerce_returns_agent

@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 RUBRIC_FIELDS = JudgeScore.RUBRIC_FIELDS
 
 JUDGE_SYSTEM_PROMPT = """You are a senior QA evaluator for voice AI agents.
-Evaluate the provided conversation transcript against the scoring rubric.
+Evaluate the provided conversation transcript against the scoring rubric and any semantic assertions.
 Return a JSON object only — no prose, no markdown fences.
 """
 
@@ -30,15 +30,23 @@ For each field return:
 
 Rubric weights (higher weight = more important to this scenario):
 {rubric}
-
+{assertions_section}
 Return JSON in this exact shape:
 {{
   "scores": {{
     "<field_name>": {{"score": 0.0, "reasoning": "...", "passed": true}},
     ...
   }},
+  "assertions": {{
+    "<assertion_name>": {{"passed": true, "reasoning": "one sentence"}}
+  }},
   "overall_reasoning": "..."
 }}
+"""
+
+ASSERTIONS_SECTION = """
+Also evaluate each of these semantic assertions as true/false with a one-sentence reasoning:
+{assertions}
 """
 
 
@@ -60,10 +68,22 @@ def evaluate_result(test_result_id: str, rubric: dict):
     scenario = result.test_run.scenario
     active_rubric = {k: v for k, v in rubric.items() if k in RUBRIC_FIELDS} or {f: 1.0 for f in RUBRIC_FIELDS}
 
+    # Collect semantic assertions that need LLM evaluation (passed=None means pending).
+    pending_semantic = [
+        a["assertion"] for a in (result.assertion_results or [])
+        if a.get("semantic") and a.get("passed") is None
+    ]
+    assertions_section = ""
+    if pending_semantic:
+        assertions_section = ASSERTIONS_SECTION.format(
+            assertions="\n".join(f"- {a}" for a in pending_semantic)
+        )
+
     user_prompt = JUDGE_TEMPLATE.format(
         persona=scenario.persona,
         transcript=_format_transcript(result.transcript),
         rubric=json.dumps(active_rubric, indent=2),
+        assertions_section=assertions_section,
     )
 
     client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
@@ -95,10 +115,27 @@ def evaluate_result(test_result_id: str, rubric: dict):
             ))
     JudgeScore.objects.bulk_create(judge_scores)
 
+    # Write semantic assertion results back into the assertion_results JSONB field.
+    assertion_evals = parsed.get("assertions", {})
+    if assertion_evals and result.assertion_results:
+        updated = []
+        for entry in result.assertion_results:
+            name = entry["assertion"]
+            if name in assertion_evals:
+                eval_data = assertion_evals[name]
+                entry = {**entry, "passed": bool(eval_data.get("passed")), "reasoning": eval_data.get("reasoning", "")}
+            updated.append(entry)
+        result.assertion_results = updated
+        result.save(update_fields=["assertion_results"])
+
     if judge_scores:
         total_weight = sum(active_rubric.get(js.field, 1.0) for js in judge_scores)
         weighted_score = sum(js.score * active_rubric.get(js.field, 1.0) for js in judge_scores) / total_weight if total_weight else 0.0
-        result.passed = weighted_score >= 0.7 and result.passed
+        # Also factor in any failed semantic assertions
+        semantic_passed = all(
+            a.get("passed", True) for a in (result.assertion_results or []) if a.get("semantic")
+        )
+        result.passed = weighted_score >= 0.7 and result.passed and semantic_passed
         result.save(update_fields=["passed"])
 
-    logger.info(f"Judge completed for TestResult {test_result_id}. Fields scored: {list(scores_data.keys())}")
+    logger.info(f"Judge completed for TestResult {test_result_id}. Fields scored: {list(scores_data.keys())}, assertions evaluated: {list(assertion_evals.keys())}")

@@ -34,24 +34,48 @@ console = Console()
 
 @agents_app.command("list")
 def agents_list():
-    """List all agents."""
+    """List all agents (synced from ElevenLabs)."""
     data = client.get("/api/v1/agents/")
     results = data.get("results", data) if isinstance(data, dict) else data
-    t = Table("ID", "Name", "Created")
-    t.columns[0].min_width = 36
+    if not results:
+        rprint("[yellow]No agents found. Run [bold]shunya agents sync[/bold] to pull your ElevenLabs agents.[/yellow]")
+        return
+    t = Table("ID", "Name", "EL Agent ID", "Created")
+    t.columns[0].no_wrap = True
     for a in results:
-        t.add_row(a["id"], a["name"], a.get("created_at", "")[:10])
-    console.print(t)
+        t.add_row(a["id"], a["name"], a.get("el_agent_id", ""), a.get("created_at", "")[:10])
+    Console(width=10000).print(t)
 
 
-@agents_app.command("create")
-def agents_create(
-    name: str = typer.Argument(..., help="Agent name"),
-    system_prompt: str = typer.Option(..., "--prompt", "-p", help="System prompt"),
+@agents_app.command("sync")
+def agents_sync():
+    """Sync agents from your connected ElevenLabs account."""
+    try:
+        # Returns the current list of active agents after upsert
+        result = client.post("/api/v1/agents/sync-elevenlabs/", {})
+    except client.ShunyaError as e:
+        rprint(f"[red]Error:[/red] {e}")
+        rprint("[dim]Tip: connect your ElevenLabs key first with [bold]shunya agents setup-elevenlabs --key <key>[/bold][/dim]")
+        raise typer.Exit(1)
+    # Backend returns a list of all active agents after sync
+    agents = result if isinstance(result, list) else result.get("results", [])
+    rprint(Panel(
+        f"[green]Sync complete — {len(agents)} active agent(s)[/green]\n\n"
+        + "\n".join(f"  • {a.get('name', '')}  [dim]{a.get('el_agent_id', '')}[/dim]" for a in agents)
+    ))
+
+
+@agents_app.command("setup-elevenlabs")
+def agents_setup_elevenlabs(
+    key: str = typer.Option(..., "--key", "-k", help="Your ElevenLabs API key (needs convai_read permission)"),
 ):
-    """Create a new agent."""
-    a = client.post("/api/v1/agents/", {"name": name, "system_prompt": system_prompt})
-    rprint(Panel(f"[green]Created agent[/green]\nID: {a['id']}\nName: {a['name']}"))
+    """Connect your ElevenLabs account by saving an API key."""
+    r = client.put("/api/v1/integrations/elevenlabs/", {"api_key": key})
+    rprint(Panel(
+        f"[green]ElevenLabs connected.[/green]\n"
+        f"Key hint: {r.get('key_hint', '')}\n\n"
+        f"Run [bold]shunya agents sync[/bold] to pull your agents."
+    ))
 
 
 @agents_app.command("show")
@@ -114,11 +138,35 @@ def scenarios_list():
     console.print(t)
 
 
+def _fetch_all_pages(path: str) -> list:
+    """Fetch all pages of a paginated endpoint."""
+    results = []
+    data = client.get(path)
+    if isinstance(data, list):
+        return data
+    results.extend(data.get("results", []))
+    # Follow DRF's 'next' pagination links (relative paths only)
+    next_url = data.get("next")
+    while next_url:
+        try:
+            from urllib.parse import urlparse, urlencode, parse_qs
+            parsed = urlparse(next_url)
+            params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+            page_data = client.get(parsed.path, **params)
+        except client.ShunyaError:
+            break
+        if isinstance(page_data, list):
+            results.extend(page_data)
+            break
+        results.extend(page_data.get("results", []))
+        next_url = page_data.get("next")
+    return results
+
+
 @scenarios_app.command("show")
 def scenarios_show(name: str):
     """Show a scenario's YAML content."""
-    data = client.get("/api/v1/scenarios/")
-    results = data.get("results", data) if isinstance(data, dict) else data
+    results = _fetch_all_pages("/api/v1/scenarios/")
     scenario = next((s for s in results if s["name"] == name), None)
     if not scenario:
         rprint(f"[red]Scenario '{name}' not found[/red]")
@@ -212,7 +260,7 @@ def tests_run_all(
     known upfront and evaluated concurrently.
 
     Scenarios are matched to agents via the 'compatible_agents' field in their YAML.
-    Scenarios with no 'compatible_agents' run against the default agent 'demo_support_agent'.
+    Scenarios with no 'compatible_agents' run against all available agents.
     """
     import time
 
@@ -222,23 +270,24 @@ def tests_run_all(
     agent_by_name = {a["name"]: a["id"] for a in agents_list}
 
     if not agent_by_name:
-        rprint("[red]No active agents found. Create or load agents first.[/red]")
+        rprint("[red]No active agents found.[/red] Run [bold]shunya agents sync[/bold] to pull your ElevenLabs agents.")
         raise typer.Exit(1)
 
     # Fetch all scenarios
     scenarios_data = client.get("/api/v1/scenarios/")
     scenarios_list = scenarios_data.get("results", scenarios_data) if isinstance(scenarios_data, dict) else scenarios_data
 
-    # Group scenarios by agent for efficient parallel dispatch
-    agent_scenarios: dict[str, list[str]] = {}  # agent_name → [scenario_names]
-    default_agent = "demo_support_agent"
+    # Group scenarios by agent for efficient parallel dispatch.
+    # Scenarios with no compatible_agents run against ALL available agents.
+    agent_scenarios: dict[str, list[str]] = {}
+    all_agent_names = list(agent_by_name.keys())
 
     for s in scenarios_list:
         scenario_name = s["name"]
         if scenario_filter and scenario_name != scenario_filter:
             continue
         compatible = s.get("compatible_agents") or []
-        targets = compatible if compatible else ([default_agent] if default_agent in agent_by_name else [])
+        targets = compatible if compatible else all_agent_names
         for agent_name in targets:
             if agent_filter and agent_name != agent_filter:
                 continue
@@ -329,26 +378,34 @@ def tests_list(
     agent_id: Optional[str] = typer.Option(None, "--agent", help="Filter by agent ID"),
 ):
     """List recent test runs."""
-    params = {}
     if agent_id:
-        params["agent"] = agent_id
-    data = client.get("/api/v1/test-runs/", **params)
+        # Use the agent-scoped endpoint for accurate filtering
+        data = client.get(f"/api/v1/agents/{agent_id}/test-runs/")
+    else:
+        data = client.get("/api/v1/test-runs/")
     results = data.get("results", data) if isinstance(data, dict) else data
-    t = Table("ID", "Agent", "Scenario", "Mode", "Status", "Passed")
-    t.columns[0].min_width = 36
-    t.columns[1].min_width = 36
-    t.columns[2].min_width = 36
+    t = Table("ID", "Scenario", "Mode", "Status", "Pass", "Scores")
+    t.columns[0].no_wrap = True
+    judging_pending = 0
     for r in results:
-        passed = str(r.get("result", {}).get("passed", "—")) if r.get("result") else "—"
-        t.add_row(
-            r["id"],
-            str(r.get("agent", "")),
-            r.get("scenario", ""),
-            r.get("mode", ""),
-            r.get("status", ""),
-            passed,
-        )
-    console.print(t)
+        scenario = r.get("scenario_name") or r.get("scenario", "")
+        result = r.get("result")
+        if result:
+            passed = "[green]✓[/green]" if result.get("passed") else "[red]✗[/red]"
+            scores = result.get("scores", [])
+            if scores:
+                n_pass = sum(1 for s in scores if s.get("passed"))
+                scores_str = f"{n_pass}/{len(scores)}"
+            else:
+                scores_str = "[yellow]judging…[/yellow]"
+                judging_pending += 1
+        else:
+            passed = "—"
+            scores_str = "—"
+        t.add_row(r["id"], scenario, r.get("mode", ""), r.get("status", ""), passed, scores_str)
+    Console(width=10000).print(t)
+    if judging_pending:
+        console.print(f"[yellow]{judging_pending} completed run(s) awaiting judge scores[/yellow]")
 
 
 @tests_app.command("show")
@@ -414,21 +471,51 @@ def tests_transcript(
             console.print()
 
     if r.get("mode") == "audio":
-        url = f"{client.BASE_URL}/recordings/{run_id}.wav"
-        console.print(f"\n[bold]🔊 Recording:[/bold] [blue underline]{url}[/blue underline]")
+        console.print(f"\n[bold]🔊 Recording:[/bold] run [cyan]shunya tests audio {run_id}[/cyan] to download and play.")
 
 
 @tests_app.command("audio")
 def tests_audio(
     run_id: str,
-    open_browser: bool = typer.Option(True, "--open/--no-open", help="Open the recording in your browser"),
+    open_player: bool = typer.Option(True, "--open/--no-open", help="Open the recording with your system player"),
+    save_to: Optional[str] = typer.Option(None, "--save", "-o", help="Save to this path instead of a temp file"),
 ):
-    """Print (and open) the audio recording link for an audio test run."""
-    url = f"{client.BASE_URL}/recordings/{run_id}.wav"
-    console.print(f"[bold]🔊 Recording:[/bold] [blue underline]{url}[/blue underline]")
-    if open_browser:
-        import webbrowser
-        webbrowser.open(url)
+    """Download and play the audio recording for an audio test run.
+
+    The recording endpoint requires authentication, so this command downloads
+    the WAV file via the API and opens it with your system's default audio player.
+    """
+    import tempfile
+    import subprocess
+    import platform
+
+    console.print("[dim]Downloading recording…[/dim]")
+    try:
+        data = client.get_bytes(f"/recordings/{run_id}.wav")
+    except client.ShunyaError as e:
+        rprint(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    if save_to:
+        out_path = save_to
+        with open(out_path, "wb") as f:
+            f.write(data)
+        console.print(f"[green]Saved:[/green] {out_path}")
+    else:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            f.write(data)
+            out_path = f.name
+        console.print(f"[dim]Saved to temp: {out_path}[/dim]")
+
+    if open_player:
+        system = platform.system()
+        if system == "Darwin":
+            subprocess.Popen(["open", out_path])
+        elif system == "Linux":
+            subprocess.Popen(["xdg-open", out_path])
+        elif system == "Windows":
+            subprocess.Popen(["start", out_path], shell=True)
+        console.print("[green]🔊 Opening recording…[/green]")
 
 
 # ── Calls ────────────────────────────────────────────────────────────────────
@@ -438,14 +525,14 @@ def calls_list(
     agent_id: Optional[str] = typer.Option(None, "--agent", help="Filter by agent ID"),
 ):
     """List recent calls."""
-    params = {}
-    if agent_id:
-        params["agent"] = agent_id
-    data = client.get("/api/v1/calls/", **params)
+    data = client.get("/api/v1/calls/")
     results = data.get("results", data) if isinstance(data, dict) else data
+    # Backend has no query-param filter for agent; filter client-side from the page
+    if agent_id:
+        results = [c for c in results if str(c.get("agent", "")) == agent_id]
     t = Table("ID", "Agent", "Source", "Status", "Started")
-    t.columns[0].min_width = 36
-    t.columns[1].min_width = 36
+    t.columns[0].no_wrap = True
+    t.columns[1].no_wrap = True
     for c in results:
         t.add_row(
             c["id"],
@@ -454,7 +541,7 @@ def calls_list(
             c.get("status", ""),
             (c.get("started_at") or "")[:16],
         )
-    console.print(t)
+    Console(width=10000).print(t)
 
 
 @calls_app.command("transcript")

@@ -11,8 +11,6 @@ steps:
   - "I don't want a refund, I want a replacement. How long will that take?"
   - "[interrupt] Actually wait — will I have to ship this broken one back first?"
   - "Okay so if I keep the broken one, you'll send a new one? And it's free shipping?"
-agents:
-  - ecommerce_returns_agent
 assertions:
   - agent_acknowledges_damage_with_empathy
   - agent_offers_replacement_and_or_refund
@@ -26,3 +24,6 @@ rubric:
   tool_call_accuracy: 1.0
   csat_tone: 1.5
   safety: 0.5
+agents:
+  - ecommerce_returns_agent
+  - demo_support_agent

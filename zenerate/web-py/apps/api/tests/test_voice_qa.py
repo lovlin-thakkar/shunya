@@ -91,22 +91,103 @@ def test_agents_list_requires_auth():
     assert resp.status_code == 401
 
 
-def test_agents_crud(client_a, tenant_a, in_tenant):
+def test_agents_not_creatable_via_api(client_a, tenant_a, in_tenant):
+    """Agents are synced from ElevenLabs, not authored in Shunya — create is gone."""
     client, tenant = client_a
-    # Create
     with in_tenant(tenant):
         resp = client.post("/api/v1/agents/", {
             "name": "Smoke Agent",
             "system_prompt": "You are a test agent.",
         }, format="json")
-    assert resp.status_code == 201, resp.data
-    agent_id = resp.data["id"]
+    assert resp.status_code == 405, resp.data
 
-    # List
+
+def test_agents_list_shows_only_elevenlabs(client_a, tenant_a, in_tenant):
+    """The list surfaces only remote ElevenLabs agents; built-ins are hidden."""
+    client, tenant = client_a
     with in_tenant(tenant):
+        Agent.objects.create(name="Builtin One", system_prompt="x")
+        el = Agent.objects.create(
+            name="Remote One", system_prompt="",
+            target_type=Agent.TargetType.ELEVENLABS, el_agent_id="agent_xyz",
+        )
         resp = client.get("/api/v1/agents/")
     assert resp.status_code == 200
-    assert any(a["id"] == agent_id for a in resp.data["results"])
+    rows = resp.data if isinstance(resp.data, list) else resp.data["results"]
+    ids = {a["id"] for a in rows}
+    assert str(el.id) in ids
+    assert all(a["target_type"] == "elevenlabs" for a in rows)
+
+
+# ---------------------------------------------------------------------------
+# ElevenLabs integration + sync
+# ---------------------------------------------------------------------------
+
+def test_elevenlabs_integration_get_unconfigured(client_a, tenant_a, in_tenant):
+    client, tenant = client_a
+    with in_tenant(tenant):
+        resp = client.get("/api/v1/integrations/elevenlabs/")
+    assert resp.status_code == 200
+    assert resp.data == {"configured": False, "key_hint": ""}
+
+
+def test_elevenlabs_integration_put_validates_and_saves(client_a, tenant_a, in_tenant):
+    from unittest.mock import MagicMock, patch
+    client, tenant = client_a
+    ok = MagicMock(status_code=200)
+    ok.json.return_value = {"agents": []}
+    with patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.views.httpx.get", return_value=ok):
+        with in_tenant(tenant):
+            resp = client.put("/api/v1/integrations/elevenlabs/",
+                              {"api_key": "sk_0123456789abcdef"}, format="json")
+            assert resp.status_code == 200
+            assert resp.data["configured"] is True
+            assert resp.data["key_hint"] == "sk_0…cdef"
+            # GET now reports configured, never the raw key
+            get = client.get("/api/v1/integrations/elevenlabs/")
+    assert get.data["configured"] is True
+    assert "api_key" not in get.data
+
+
+def test_elevenlabs_integration_put_rejects_bad_key(client_a, tenant_a, in_tenant):
+    from unittest.mock import MagicMock, patch
+    client, tenant = client_a
+    bad = MagicMock(status_code=401)
+    with patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.views.httpx.get", return_value=bad):
+        with in_tenant(tenant):
+            resp = client.put("/api/v1/integrations/elevenlabs/",
+                              {"api_key": "sk_bad"}, format="json")
+    assert resp.status_code == 400
+    assert "convai_read" in resp.data["error"]
+
+
+def test_sync_elevenlabs_requires_key(client_a, tenant_a, in_tenant):
+    client, tenant = client_a
+    with in_tenant(tenant):
+        resp = client.post("/api/v1/agents/sync-elevenlabs/")
+    assert resp.status_code == 400
+
+
+def test_sync_elevenlabs_upserts_agents(client_a, tenant_a, in_tenant):
+    from unittest.mock import MagicMock, patch
+    from zenlib_agentos.zenlib.reusable_apps.voice_qa.models import ElevenLabsCredential
+    client, tenant = client_a
+    with in_tenant(tenant):
+        ElevenLabsCredential.objects.create(tenant=tenant, api_key="sk_x", key_hint="sk_x…")
+    listed = MagicMock(status_code=200)
+    listed.raise_for_status = MagicMock()
+    listed.json.return_value = {"agents": [
+        {"agent_id": "agent_aaa", "name": "Support Bot"},
+        {"agent_id": "agent_bbb", "name": "Sales Bot"},
+    ]}
+    with patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.views.httpx.get", return_value=listed):
+        with in_tenant(tenant):
+            resp = client.post("/api/v1/agents/sync-elevenlabs/")
+    assert resp.status_code == 200
+    rows = resp.data if isinstance(resp.data, list) else resp.data["results"]
+    names = {a["name"] for a in rows}
+    assert {"Support Bot", "Sales Bot"} <= names
+    assert all(a["target_type"] == "elevenlabs" for a in rows)
 
 
 def test_scenarios_list(client_a, tenant_a, in_tenant):

@@ -78,10 +78,9 @@ separate FastAPI services (`:8001` agent, `:8002` caller).
 | Service          | Process / Port      | Entry point                       | Role                                                            |
 |------------------|---------------------|-----------------------------------|----------------------------------------------------------------|
 | **Django API**   | `:8000`             | `django_api/config/`              | Multi-tenant REST control plane; serves `/recordings/*.wav`     |
-| **Celery worker**| —                   | `django_api/apps/*/tasks.py`      | Runs scenarios + LLM judge; NOT auto-reloaded                   |
-| **Celery beat**  | —                   | `config/celery.py`                | Schedules monitoring/alert rollups                              |
-| **Pipecat agent**| `:8001`             | `pipecat_agent/server.py`         | The voice **agent under test** pipeline                         |
-| **Caller bot**   | `:8002`             | `pipecat_agent/caller_server.py`  | The synthetic **caller** (`ScenarioCallerBot`)                  |
+| **Celery worker**| —                   | `django_api/apps/*/tasks.py`      | Runs scenarios + LLM judge + metric/alert computation; NOT auto-reloaded |
+| **Pipecat agent**| `:8001`             | `services/voice/server.py`        | The voice **agent under test** pipeline                         |
+| **Caller bot**   | `:8002`             | `services/voice/caller_server.py` | The synthetic **caller** (`ScenarioCallerBot` + remote `EvalAgent`) |
 | **CLI**          | local               | `cli/main.py`                     | Thin wrapper over the REST API (`shunya …`)                     |
 | Postgres / Redis | `:5432` / `:6379`   | docker-compose                    | Schema-per-tenant DB; Celery broker + result backend           |
 
@@ -288,14 +287,15 @@ Shunya/
 │       ├── conftest.py
 │       └── test_*.py           # api_smoke, caller, judge, monitoring, cli
 │
-├── pipecat_agent/              # ── VOICE RUNTIME (Python 3.12 / linux-amd64) ───────
+├── services/voice/              # ── VOICE RUNTIME (Python 3.12 / linux-amd64) ───────
 │   ├── server.py               # :8001 AGENT — /connect, /caller/run, /health
 │   ├── pipeline.py             # run_voice_agent(): Scribe v2 STT → Haiku → 11Labs TTS;
 │   │                           #   RetryingElevenLabsTTSService; _notify_django() → /internal
-│   ├── caller_server.py        # :8002 CALLER — /run, /health
+│   ├── caller_server.py        # :8002 CALLER — /run, /remote/connect, /remote/run, /health
 │   ├── caller_bot.py           # ScenarioCallerBot, Turn; mixes both sides → mono 16kHz WAV
-│   ├── caller_bot_main.py      # standalone caller entry (main())
+│   ├── eval_agent.py           # EvalAgent (BaseWorker), EvalBridge, ScoringSubAgent — remote EL agent test runner
 │   ├── config.py               # voice IDs, model names, defaults
+│   ├── audio_utils.py          # shared TTS + WAV recording utilities
 │   ├── Dockerfile
 │   └── requirements.txt
 │
@@ -321,8 +321,9 @@ Shunya/
 | Add/modify a Voice Quirks DSL tag            | `apps/testing/quirks.py` + `caller.py` (`strip_quirks`)         |
 | Tune the rubric scoring or pass threshold    | `apps/testing/judge.py`                                          |
 | Change the agent's brain (text mode)         | `apps/agents/chat.py` (`AgentChat`, Haiku)                       |
-| Change the voice pipeline (STT/LLM/TTS)      | `pipecat_agent/pipeline.py`                                      |
-| Change the synthetic caller's behavior       | `pipecat_agent/caller_bot.py` (`ScenarioCallerBot`)             |
+| Change the voice pipeline (STT/LLM/TTS)      | `services/voice/pipeline.py`                                      |
+| Change the synthetic caller's behavior       | `services/voice/caller_bot.py` (`ScenarioCallerBot`)             |
+| Change remote EL agent eval behavior         | `services/voice/eval_agent.py` (`EvalAgent`, `EvalBridge`)       |
 | Talk to an agent live in a browser           | `shunya agents connect <id>` → `POST /api/agents/<id>/connect/` |
 | Add a REST endpoint                          | the relevant `apps/<app>/views.py` + `urls.py`                  |
 | Add a Celery task                            | `apps/<app>/tasks.py` (remember the `schema_name` arg!)         |
@@ -354,8 +355,8 @@ Shunya/
 |-----------------------------|--------------------------------|-----------------------------|
 | Agent brain (under test)    | `claude-haiku-4-5-20251001`    | `apps/agents/chat.py`, pipeline |
 | LLM judge (rubric scoring)  | `claude-sonnet-4-6`            | `apps/testing/judge.py`     |
-| STT (audio mode)            | ElevenLabs **Scribe v2**       | `pipecat_agent/pipeline.py`, `caller_bot.py` |
-| TTS (audio mode)            | ElevenLabs                     | `pipecat_agent/pipeline.py`, `caller_bot.py` |
+| STT (audio mode)            | ElevenLabs **Scribe v2**       | `services/voice/pipeline.py`, `services/voice/caller_bot.py` |
+| TTS (audio mode)            | ElevenLabs                     | `services/voice/pipeline.py`, `services/voice/caller_bot.py` |
 
 ---
 

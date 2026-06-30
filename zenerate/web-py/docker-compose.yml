@@ -35,7 +35,6 @@ services:
       - .:/app
       - django_venv:/app/.venv
       - ./scenarios:/scenarios
-      - ./agents:/agents
       - recordings:/recordings
     ports:
       - "8000:8000"
@@ -64,7 +63,6 @@ services:
       - .:/app
       - django_venv:/app/.venv
       - ./scenarios:/scenarios
-      - ./agents:/agents
     env_file:
       - ./apps/api/.env
     environment:
@@ -74,29 +72,7 @@ services:
       DB_NAME: zenapi
       REDIS_URL: redis://redis:6379/0
       PIPECAT_SERVER_URL: http://pipecat:8001
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
-  celery_beat:
-    build:
-      context: .
-      dockerfile: apps/api/Dockerfile
-    command: uv run celery -A zenapi.celery beat --loglevel=info
-    working_dir: /app/apps/api
-    volumes:
-      - .:/app
-      - django_venv:/app/.venv
-    env_file:
-      - ./apps/api/.env
-    environment:
-      DB_HOST: db
-      DB_USER: zen
-      DB_PASSWORD: zen
-      DB_NAME: zenapi
-      REDIS_URL: redis://redis:6379/0
+      CALLER_SERVER_URL: http://caller:8002
     depends_on:
       db:
         condition: service_healthy
@@ -133,6 +109,20 @@ services:
       - "8002:8002"
     env_file:
       - ./services/voice/.env
+    environment:
+      # The judge sub-agent posts live scores to Django — must use the service
+      # hostname, not the .env's localhost (which is the caller container itself).
+      DJANGO_API_URL: http://django:8000
+
+  web:
+    build:
+      context: ./services/web
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    depends_on:
+      - django
 
 volumes:
   pgdata: {}

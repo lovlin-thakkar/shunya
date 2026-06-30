@@ -8,11 +8,11 @@ import time
 import logging
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from config import DEFAULT_VOICE_ID
+from config import DEFAULT_VOICE_ID, CALLER_DEFAULT_VOICE_ID
 from pipeline import run_voice_agent
 
 logging.basicConfig(level=logging.INFO)
@@ -22,13 +22,33 @@ app = FastAPI(title="Shunya Voice Agent")
 
 DAILY_API_KEY = os.environ["DAILY_API_KEY"]
 DAILY_API_URL = "https://api.daily.co/v1"
+SERVICE_TOKEN = os.environ.get("DJANGO_SERVICE_TOKEN", "")
+
+
+def _require_service_token(x_service_token: str = Header(default="")) -> None:
+    """Dependency that enforces X-Service-Token on internal endpoints."""
+    if not SERVICE_TOKEN:
+        raise HTTPException(status_code=500, detail="Service token not configured")
+    if x_service_token != SERVICE_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid service token")
 
 # Per-room readiness: set once the agent's TTS WebSocket is connected, so the
 # synthetic caller only starts after the agent can actually respond.
 AGENT_READY: dict[str, asyncio.Event] = {}
 
+
 # Track background pipeline tasks so exceptions are not silently lost.
 _PIPELINE_TASKS: dict[str, asyncio.Task] = {}
+
+# Limit concurrent active pipelines so Daily.co API and the caller service
+# are not overwhelmed when run-evals fires many audio runs in parallel.
+# Callers that exceed this get 429 and Celery retries them with backoff.
+MAX_CONCURRENT_PIPELINES = 5
+
+# Atomic counter — incremented synchronously (before the first await) inside
+# /connect so concurrent requests see the correct count even when they all
+# arrive at once.  Decremented in the pipeline task's done_callback.
+_active_pipeline_count: int = 0
 
 
 async def _create_daily_room(room_name: str) -> dict:
@@ -70,23 +90,50 @@ class ConnectRequest(BaseModel):
     room_name: str | None = None
 
 
-@app.post("/connect")
+@app.post("/connect", dependencies=[Depends(_require_service_token)])
 async def connect(req: ConnectRequest):
     """
     Called by Django to provision a room and start the voice pipeline.
     Returns the room_url for the human caller to join.
+
+    Capped at MAX_CONCURRENT_PIPELINES simultaneous active calls.  Excess
+    requests receive 429 so the Celery task can retry with backoff instead of
+    hammering Daily.co and getting 502 errors under load.
+
+    The counter is incremented synchronously (no await between check and
+    increment) so concurrent requests arriving at the same time all see the
+    correct count — asyncio only switches context at await points.
     """
+    global _active_pipeline_count
+    if _active_pipeline_count >= MAX_CONCURRENT_PIPELINES:
+        logger.warning(f"Pipeline capacity full ({_active_pipeline_count}/{MAX_CONCURRENT_PIPELINES}), rejecting connect")
+        raise HTTPException(
+            status_code=429,
+            detail=f"Pipeline at capacity ({_active_pipeline_count} active). Retry shortly.",
+        )
+    # Increment before the first await — any concurrent request that sneaks in
+    # after this point will see the updated count.
+    _active_pipeline_count += 1
+
     room_name = req.room_name or f"shunya-{req.agent_id[:8]}-{int(asyncio.get_event_loop().time())}"
 
     try:
         room = await _create_daily_room(room_name)
     except httpx.HTTPStatusError as e:
+        _active_pipeline_count -= 1
         raise HTTPException(status_code=502, detail=f"Daily room creation failed: {e}")
+    except Exception as e:
+        _active_pipeline_count -= 1
+        raise
 
     room_url = room["url"]
-    bot_token = await _get_room_token(room_name, is_owner=True)
-    caller_token = await _get_room_token(room_name, is_owner=False)
-    observer_token = await _get_room_token(room_name, is_owner=False)
+    try:
+        bot_token = await _get_room_token(room_name, is_owner=True)
+        caller_token = await _get_room_token(room_name, is_owner=False)
+        observer_token = await _get_room_token(room_name, is_owner=False)
+    except Exception:
+        _active_pipeline_count -= 1
+        raise
 
     ready_event = asyncio.Event()
     AGENT_READY[room_url] = ready_event
@@ -107,12 +154,15 @@ async def connect(req: ConnectRequest):
         name=f"pipeline-{room_name}",
     )
     _PIPELINE_TASKS[room_url] = task
-    task.add_done_callback(
-        lambda t: (
-            _PIPELINE_TASKS.pop(room_url, None),
-            logger.error(f"Pipeline {room_name} raised: {t.exception()}") if t.exception() else None,
-        )
-    )
+
+    def _pipeline_done(t: asyncio.Task) -> None:
+        global _active_pipeline_count
+        _active_pipeline_count -= 1
+        _PIPELINE_TASKS.pop(room_url, None)
+        if not t.cancelled() and t.exception():
+            logger.error(f"Pipeline {room_name} raised: {t.exception()}")
+
+    task.add_done_callback(_pipeline_done)
 
     return JSONResponse({
         "room_url": room_url,
@@ -135,7 +185,7 @@ class CallerRunRequest(BaseModel):
 CALLER_SERVICE_URL = os.environ.get("CALLER_SERVICE_URL", "http://caller:8002")
 
 
-@app.post("/caller/run")
+@app.post("/caller/run", dependencies=[Depends(_require_service_token)])
 async def caller_run(req: CallerRunRequest):
     """
     Forward to the caller service (separate process with its own Daily SDK context).
@@ -154,11 +204,12 @@ async def caller_run(req: CallerRunRequest):
         async with httpx.AsyncClient(timeout=300) as c:
             r = await c.post(
                 f"{CALLER_SERVICE_URL}/run",
+                headers={"X-Service-Token": SERVICE_TOKEN},
                 json={
                     "room_url": req.room_url,
                     "room_token": req.room_token,
                     "steps": req.steps,
-                    "voice_id": req.voice_id,
+                    "voice_id": CALLER_DEFAULT_VOICE_ID,
                     "recording_id": req.recording_id,
                 },
             )
@@ -172,27 +223,6 @@ async def caller_run(req: CallerRunRequest):
         raise HTTPException(status_code=503, detail=f"Caller service unreachable: {e}")
     finally:
         AGENT_READY.pop(req.room_url, None)
-
-
-@app.get("/debug-ws")
-async def debug_ws():
-    """Attempt the ElevenLabs TTS WS handshake from inside the server event loop."""
-    from websockets.asyncio.client import connect as websocket_connect
-    key = os.environ["ELEVENLABS_API_KEY"]
-    url = (
-        f"wss://api.elevenlabs.io/v1/text-to-speech/{DEFAULT_VOICE_ID}/"
-        "multi-stream-input?model_id=eleven_turbo_v2_5&output_format=pcm_24000&auto_mode=true"
-    )
-    results = []
-    for i in range(3):
-        try:
-            ws = await websocket_connect(url, max_size=16 * 1024 * 1024,
-                                         additional_headers={"xi-api-key": key})
-            await ws.close()
-            results.append(f"{i}:OK")
-        except Exception as e:
-            results.append(f"{i}:{type(e).__name__}:{e}")
-    return {"results": results}
 
 
 @app.get("/health")

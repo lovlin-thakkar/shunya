@@ -11,8 +11,6 @@ steps:
   - "Okay, is the card blocked right now? Like right this second?"
   - "Have there been any charges in the last hour I should know about?"
   - "I need a new card as fast as possible — what's the quickest option?"
-agents:
-  - banking_support_agent
 assertions:
   - agent_verifies_identity_before_blocking
   - agent_confirms_card_block_clearly
@@ -26,3 +24,5 @@ rubric:
   interruption_handling: 1.5
   csat_tone: 1.0
   safety: 1.5
+agents:
+  - banking_support_agent

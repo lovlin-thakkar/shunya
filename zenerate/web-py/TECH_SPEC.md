@@ -45,7 +45,7 @@ External APIs: Claude Haiku 4.5 (agent brain), Claude Sonnet 4.6 (LLM judge),
                ElevenLabs (TTS + Scribe v2 STT), Daily.co (WebRTC transport)
 
 Deployment: docker-compose — postgres, redis, django, celery_worker,
-            celery_beat, pipecat (:8001, py3.12/amd64), caller (:8002, py3.12/amd64).
+            pipecat (:8001, py3.12/amd64), caller (:8002, py3.12/amd64).
             ./recordings is bind-mounted into caller (writes) and django (serves).
 ```
 
@@ -390,6 +390,12 @@ POST   /run                            # body: {room_url, room_token, steps, voi
                                        #   ScenarioCallerBot joins the room, runs the scenario,
                                        #   writes /recordings/<recording_id>.wav,
                                        #   returns {transcript, recording_file}
+POST   /remote/connect                 # (no body) provisions a Daily room for a remote EL agent call,
+                                       #   returns {room_url, room_name, caller_token, observer_url}
+POST   /remote/run                     # body: {el_agent_id, steps, agent_api_key, ...}
+                                       #   EvalAgent (BaseWorker) connects to ElevenLabs Conversational AI WS,
+                                       #   drives scenario steps, bridges audio to Daily room,
+                                       #   runs concurrent ScoringSubAgents, returns {transcript, recording_file}
 ```
 
 > The agent pipeline and the caller bot are **separate processes/containers** — `daily-python` cannot host two `CallClient`s (or call `Daily.init()` twice) in one process.
@@ -422,17 +428,20 @@ shunya/
 │   │   │   └── management/
 │   │   │       └── commands/
 │   │   │           └── load_scenarios.py
-│   │   └── monitoring/         # AlertConfig, AlertEvent + Celery beat tasks
+│   │   └── monitoring/         # AlertConfig, AlertEvent + metric/alert Celery tasks
 │   └── requirements.txt
 │
-├── pipecat_agent/              # py3.12 / linux/amd64 (Daily SDK requirement)
+├── services/voice/             # py3.12 / linux/amd64 (Daily SDK requirement)
 │   ├── server.py               # FastAPI: /connect (agent) + /caller/run (proxy to caller svc)
 │   ├── pipeline.py             # Agent pipeline: Daily→Scribe v2→Claude Haiku→ElevenLabs
 │   │                           #   incl. VADProcessor(Silero) before STT + RetryingElevenLabsTTSService
-│   ├── caller_server.py        # FastAPI (:8002): /run → ScenarioCallerBot
+│   ├── caller_server.py        # FastAPI (:8002): /run → ScenarioCallerBot; /remote/connect + /remote/run → EvalAgent
 │   ├── caller_bot.py           # ScenarioCallerBot: virtual mic/speaker, TTS, Scribe, WAV recording
+│   ├── eval_agent.py           # EvalAgent (BaseWorker), EvalBridge (raw daily.CallClient), ScoringSubAgent — remote EL agent test runner
+│   ├── audio_utils.py          # shared TTS + WAV recording utilities
+│   ├── config.py               # voice IDs, defaults
 │   ├── Dockerfile              # FROM --platform=linux/amd64 python:3.12-slim
-│   └── requirements.txt        # pipecat-ai[daily,elevenlabs,silero,anthropic]
+│   └── requirements.txt        # pipecat-ai[daily,elevenlabs,silero,anthropic,websockets]
 │
 ├── cli/
 │   ├── main.py                 # Typer app root + main() wrapper (clean ShunyaError handling)
@@ -445,7 +454,7 @@ shunya/
 │
 ├── recordings/                 # bind-mounted: caller writes WAVs, django serves them
 ├── setup.py                    # `pip install -e .` → `shunya` command (entry: cli.main:main)
-├── docker-compose.yml          # postgres, redis, django, celery_worker, celery_beat, pipecat, caller
+├── docker-compose.yml          # postgres, redis, django, celery_worker, pipecat, caller
 └── RUNBOOK.md
 ```
 
@@ -496,10 +505,10 @@ def get_caller(mode, agent) -> CallerInterface:
 |---|---|---|
 | 1 | Django foundation: models + migrations + tenant setup + API key auth | `apps/tenants/`, all `models.py` files |
 | 2 | Agent chat endpoint + DRF viewsets for all resources | `apps/agents/chat.py`, `apps/*/views.py`, `config/urls.py` |
-| 3 | Pipecat voice agent: pipeline + Daily room lifecycle | `pipecat_agent/server.py`, `pipecat_agent/pipeline.py` |
+| 3 | Pipecat voice agent: pipeline + Daily room lifecycle | `services/voice/server.py`, `services/voice/pipeline.py` |
 | 4 | Text mode: YAML loader + TextCaller + Celery runner | `apps/testing/caller.py`, `apps/testing/runner.py`, `scenarios/` |
 | 5 | LLM Judge: Claude rubric scoring + JudgeScore writes | `apps/testing/judge.py` |
-| 6 | Audio fidelity mode: ScenarioCallerBot (separate caller service) | `pipecat_agent/caller_server.py`, `pipecat_agent/caller_bot.py`, `apps/testing/caller.py` |
+| 6 | Audio fidelity mode: ScenarioCallerBot + remote EvalAgent (separate caller service) | `services/voice/caller_server.py`, `services/voice/caller_bot.py`, `services/voice/eval_agent.py`, `apps/testing/caller.py` |
 | 7 | Monitoring: post-call metrics + AlertConfig + webhook | `apps/monitoring/` |
 | 8 | CLI: Typer control plane | `cli/` |
 | 9 | Tests: pytest + bot-to-bot integration test | `tests/` |

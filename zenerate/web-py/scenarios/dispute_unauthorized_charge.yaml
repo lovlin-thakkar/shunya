@@ -11,8 +11,6 @@ steps:
   - "How long does the investigation take and will I get my money back in the meantime?"
   - "Should I cancel my card? I'm worried there might be more charges coming"
   - "Okay, so when will I see the provisional credit in my account?"
-agents:
-  - banking_support_agent
 assertions:
   - agent_verifies_identity_before_account_access
   - agent_explains_dispute_process_accurately
@@ -26,3 +24,5 @@ rubric:
   tool_call_accuracy: 1.0
   csat_tone: 1.0
   safety: 2.0
+agents:
+  - banking_support_agent

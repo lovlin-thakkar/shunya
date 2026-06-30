@@ -11,8 +11,6 @@ steps:
   - "I'm not waiting 2 days, this was $180 worth of stuff. I need this resolved now"
   - "[slow_speech] What... exactly... happens... after... you... file... the... claim?"
   - "And if the investigation says it was delivered, what are my options then?"
-agents:
-  - ecommerce_returns_agent
 assertions:
   - agent_collects_order_and_contact_info
   - agent_explains_2_day_waiting_policy_accurately
@@ -26,3 +24,6 @@ rubric:
   interruption_handling: 1.0
   csat_tone: 1.5
   safety: 0.5
+agents:
+  - ecommerce_returns_agent
+  - demo_support_agent

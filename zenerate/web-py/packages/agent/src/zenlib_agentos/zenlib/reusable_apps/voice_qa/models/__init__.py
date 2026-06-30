@@ -65,6 +65,15 @@ class Agent(UUIDTenantModel):
         ACTIVE = "active"
         INACTIVE = "inactive"
 
+    class TargetType(models.TextChoices):
+        # The agent under test is reconstructed by our own Pipecat pipeline
+        # (Scribe STT → Haiku → ElevenLabs TTS) from system_prompt/greeting/voice_id.
+        BUILTIN = "builtin", "Built-in (Pipecat)"
+        # The agent under test is a customer's deployed ElevenLabs Conversational
+        # AI agent, reached over WebSocket by el_agent_id. system_prompt/voice_id
+        # are ignored for this type — the remote agent owns its own brain/voice.
+        ELEVENLABS = "elevenlabs", "Remote ElevenLabs agent"
+
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True, default="")
     system_prompt = models.TextField()
@@ -72,12 +81,41 @@ class Agent(UUIDTenantModel):
     voice_id = models.CharField(max_length=255, blank=True, default="")
     yaml_content = models.TextField(blank=True, default="")
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
+    target_type = models.CharField(
+        max_length=20, choices=TargetType.choices, default=TargetType.BUILTIN
+    )
+    # ElevenLabs Conversational AI agent_id — only used when target_type is ELEVENLABS.
+    el_agent_id = models.CharField(max_length=255, blank=True, default="")
+    # Dynamic variables injected into conversation_initiation_client_data for ElevenLabs agents.
+    # Keys/values must match what the agent's prompt template requires (e.g. {"company_name": "Acme"}).
+    dynamic_variables = models.JSONField(default=dict, blank=True)
 
     class Meta(ActivityTenantBaseModel.Meta):
         ordering = ["-created_at"]
 
     def __str__(self):
         return self.name
+
+
+class ElevenLabsCredential(UUIDTenantModel):
+    """Per-tenant ElevenLabs API key used to list and drive the tenant's own
+    Conversational AI agents.
+
+    Write-only: the raw key is never returned through the API — callers only see
+    `key_hint` (a masked preview) and whether a key is configured. At-rest DB
+    encryption is a follow-up (would require adding the `cryptography` dep).
+    """
+
+    api_key = models.TextField()
+    key_hint = models.CharField(max_length=16, blank=True, default="")  # e.g. "sk_0…a1b2"
+
+    class Meta(ActivityTenantBaseModel.Meta):
+        constraints = [
+            models.UniqueConstraint(fields=["tenant"], name="uniq_el_credential_per_tenant"),
+        ]
+
+    def __str__(self) -> str:
+        return f"ElevenLabs key for {self.tenant} ({self.key_hint})"
 
 
 class Call(UUIDTenantModel):
@@ -141,7 +179,9 @@ class Scenario(UUIDTenantModel):
     steps = models.JSONField(default=list)       # [{text, raw, quirks: [{tag, value}]}]
     assertions = models.JSONField(default=list)  # [str]
     rubric = models.JSONField(default=dict)      # {field: weight}
-    compatible_agents = models.JSONField(default=list)  # agent names; empty = any agent
+    compatible_agents = models.ManyToManyField(
+        "Agent", blank=True, related_name="compatible_scenarios"
+    )  # empty = compatible with any agent
 
     class Meta(ActivityTenantBaseModel.Meta):
         ordering = ["name"]
@@ -174,6 +214,14 @@ class TestRun(UUIDTenantModel):
     completed_at = models.DateTimeField(null=True, blank=True)
     # Pre-auth Daily.co join link; set at call-start so observers can join mid-run
     observer_url = models.URLField(blank=True, default="", max_length=500)
+    error_message = models.TextField(blank=True, default="")
+    # Set when the remote agent (ElevenLabs) closed the WS mid-conversation — the
+    # run still completes with a truncated transcript; this explains why.
+    disconnect_reason = models.CharField(max_length=255, blank=True, default="")
+    # During-call scoring from the judge sub-agent, updated turn-by-turn while the
+    # call runs: {"turn": int, "scores": [{field, score, passed, reasoning}]}.
+    # The post-call judge still writes the authoritative JudgeScore rows.
+    live_scores = models.JSONField(default=dict)
 
     class Meta(ActivityTenantBaseModel.Meta):
         ordering = ["-created_at"]

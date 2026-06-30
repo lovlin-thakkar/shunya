@@ -11,7 +11,6 @@ zenerate/web-py/        ← the entire active codebase
 ├── services/voice/     ← Pipecat agent + caller bot
 ├── cli/                ← shunya CLI
 ├── scenarios/          ← scenario YAML files
-├── agents/             ← agent YAML files
 └── docker-compose.yml
 ```
 
@@ -43,17 +42,14 @@ uv run python manage.py migrate
 # Load scenario YAML files into DB
 uv run python manage.py load_scenarios --dir ../../scenarios
 
-# Load agents from YAML
-uv run python manage.py load_agents --dir ../../agents
+# (Agents are not authored here — they are synced from each tenant's ElevenLabs
+# account via POST /api/v1/agents/sync-elevenlabs/. There is no load_agents.)
 
 # Dev server (port 8000)
 uv run python manage.py runserver
 
-# Celery worker (required for test runs and LLM judge)
+# Celery worker (required for test runs, LLM judge, and metric/alert computation)
 uv run celery -A zenapi.celery worker --loglevel=info
-
-# Celery beat (monitoring/alert tasks)
-uv run celery -A zenapi.celery beat --loglevel=info
 ```
 
 ### Tests
@@ -85,8 +81,7 @@ pip install -e .                       # installs `shunya` command
 export SHUNYA_API_KEY=...             # required for all commands
 export SHUNYA_BASE_URL=http://localhost:8000  # default
 
-shunya agents list
-shunya agents create "My Agent" --prompt "You are a helpful assistant."
+shunya agents list                    # agents are synced from ElevenLabs, not created
 shunya tests run <agent-id> --scenario angry_customer_refund --mode text --wait
 shunya tests run <agent-id> --scenario booking_happy_path --mode audio --wait
 shunya tests transcript <run-id>      # print conversation transcript
@@ -100,7 +95,7 @@ shunya calls transcript <call-id>
 
 ```bash
 cd zenerate/web-py
-docker compose up    # postgres, redis, django, celery_worker, celery_beat, pipecat (:8001), caller (:8002)
+docker compose up    # postgres, redis, django, celery_worker, pipecat (:8001), caller (:8002)
 ```
 
 **Gotcha:** `celery_worker` does NOT auto-reload on code changes. After editing voice_qa services or tasks, run `docker compose restart celery_worker`. (Django, pipecat, and caller all run with `--reload`.)
