@@ -67,7 +67,7 @@ def call_obj(tenant_a, in_tenant, agent_obj):
 
 
 # ===========================================================================
-# metrics.py — compute_metrics, _is_safe_webhook_url, _check_alerts, _fire_alert
+# metrics.py — compute_metrics, _check_alerts, _fire_alert / ssrf.py — is_safe_webhook_url
 # ===========================================================================
 
 def test_compute_metrics_basic(tenant_a, in_tenant, agent_obj, call_obj):
@@ -109,23 +109,23 @@ def test_compute_metrics_no_transcript(tenant_a, in_tenant, call_obj):
 
 
 def test_is_safe_webhook_url_valid():
-    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.metrics import _is_safe_webhook_url
+    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.ssrf import is_safe_webhook_url as _is_safe_webhook_url
     # A genuine public URL (or unresolvable) should not be blocked
     assert _is_safe_webhook_url("https://nonexistent-host-xyz123.example.com/hook") is True
 
 
 def test_is_safe_webhook_url_localhost():
-    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.metrics import _is_safe_webhook_url
+    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.ssrf import is_safe_webhook_url as _is_safe_webhook_url
     assert _is_safe_webhook_url("http://localhost/hook") is False
 
 
 def test_is_safe_webhook_url_metadata_server():
-    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.metrics import _is_safe_webhook_url
+    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.ssrf import is_safe_webhook_url as _is_safe_webhook_url
     assert _is_safe_webhook_url("http://169.254.169.254/latest") is False
 
 
 def test_is_safe_webhook_url_bad_scheme():
-    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.metrics import _is_safe_webhook_url
+    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.ssrf import is_safe_webhook_url as _is_safe_webhook_url
     assert _is_safe_webhook_url("ftp://example.com/hook") is False
 
 

@@ -66,9 +66,9 @@ class Agent(UUIDTenantModel):
         INACTIVE = "inactive"
 
     class TargetType(models.TextChoices):
-        # The agent under test is reconstructed by our own Pipecat pipeline
-        # (Scribe STT → Haiku → ElevenLabs TTS) from system_prompt/greeting/voice_id.
-        BUILTIN = "builtin", "Built-in (Pipecat)"
+        # The agent under test is driven by AgentChat (Claude Haiku, in-process)
+        # using system_prompt/greeting. Text-only; no audio pipeline.
+        BUILTIN = "builtin", "Built-in (Text)"
         # The agent under test is a customer's deployed ElevenLabs Conversational
         # AI agent, reached over WebSocket by el_agent_id. system_prompt/voice_id
         # are ignored for this type — the remote agent owns its own brain/voice.
@@ -218,9 +218,9 @@ class TestRun(UUIDTenantModel):
     # Set when the remote agent (ElevenLabs) closed the WS mid-conversation — the
     # run still completes with a truncated transcript; this explains why.
     disconnect_reason = models.CharField(max_length=255, blank=True, default="")
-    # During-call scoring from the judge sub-agent, updated turn-by-turn while the
-    # call runs: {"turn": int, "scores": [{field, score, passed, reasoning}]}.
-    # The post-call judge still writes the authoritative JudgeScore rows.
+    # During-call scores from Scorer (remote mode), updated turn-by-turn:
+    # {"turn": int, "scores": [{field, score, passed, reasoning}]}.
+    # Promoted to permanent JudgeScore rows by _promote_live_scores() after the call.
     live_scores = models.JSONField(default=dict)
 
     class Meta(ActivityTenantBaseModel.Meta):

@@ -275,3 +275,87 @@ def test_run_scenario_remote_mode(tenant_a, in_tenant, remote_agent):
     assert run.status == TestRun.Status.COMPLETED
     result = TestResult.objects.get(test_run=run)
     assert any(t["speaker"] == "agent" for t in result.transcript)
+
+
+# ---------------------------------------------------------------------------
+# _post_call_score — text mode scoring writes JudgeScore rows
+# ---------------------------------------------------------------------------
+
+def test_post_call_score_writes_judge_scores(tenant_a, in_tenant, test_run):
+    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.runner import run_scenario
+    from zenlib_agentos.zenlib.reusable_apps.voice_qa.models import JudgeScore
+
+    mock_chat = MagicMock()
+    mock_chat.content = [MagicMock(text="I can help you.")]
+
+    mock_scores = [
+        {"field": "safety", "score": 0.9, "reasoning": "safe", "passed": True},
+        {"field": "goal_completion", "score": 0.8, "reasoning": "done", "passed": True},
+    ]
+    with patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.services.chat.anthropic.Anthropic") as MockA:
+        MockA.return_value.messages.create.return_value = mock_chat
+        with patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.services.runner.score_transcript",
+                   return_value=mock_scores) as mock_score:
+            with in_tenant(tenant_a):
+                run_scenario(str(test_run.id))
+
+    assert mock_score.called
+    with in_tenant(tenant_a):
+        scores = list(JudgeScore.objects.filter(test_result__test_run=test_run))
+    assert len(scores) == 2
+    fields = {s.field for s in scores}
+    assert "safety" in fields
+    assert "goal_completion" in fields
+
+
+def test_post_call_score_skipped_when_live_scores_present(tenant_a, in_tenant, remote_agent):
+    """Remote mode: _promote_live_scores found scores → _post_call_score must not run."""
+    from zenlib_agentos.zenlib.reusable_apps.voice_qa.services.runner import run_scenario
+    from zenlib_agentos.zenlib.reusable_apps.voice_qa.models import JudgeScore
+
+    with in_tenant(tenant_a):
+        scenario = Scenario.objects.create(
+            name="live_skip_scen", yaml_content="x", persona="x",
+            steps=[{"text": "hello", "raw": "hello", "quirks": []}],
+            rubric={"safety": 1.0},
+        )
+        run = TestRun.objects.create(agent=remote_agent, scenario=scenario)
+        # Pre-populate live_scores as if Scorer already ran
+        run.live_scores = {"turn": 1, "scores": [
+            {"field": "safety", "score": 0.95, "reasoning": "great", "passed": True}
+        ]}
+        run.save(update_fields=["live_scores"])
+
+    transcript = [{"speaker": "agent", "text": "Hi", "ts_ms": 0, "quirks": []}]
+    with patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.services.caller.RemoteAudioCaller.run_scenario",
+               return_value=transcript):
+        with patch("zenlib_agentos.zenlib.reusable_apps.voice_qa.services.runner.score_transcript") as mock_score:
+            with in_tenant(tenant_a):
+                run_scenario(str(run.id))
+
+    mock_score.assert_not_called()
+    with in_tenant(tenant_a):
+        assert JudgeScore.objects.filter(test_result__test_run=run, field="safety").exists()
+
+
+# ---------------------------------------------------------------------------
+# agent.chat — ElevenLabs agents must be rejected
+# ---------------------------------------------------------------------------
+
+def test_agent_chat_rejects_elevenlabs_agent(tenant_a, in_tenant, remote_agent):
+    from zenlib_agentos.zenlib.reusable_apps.voice_qa.models import TenantAPIKey
+    from rest_framework.test import APIClient
+
+    with in_tenant(tenant_a):
+        _, raw = TenantAPIKey.generate(tenant_a)
+
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f"Api-Key {raw}")
+    with in_tenant(tenant_a):
+        resp = client.post(
+            f"/api/v1/agents/{remote_agent.id}/chat/",
+            {"message": "hello", "conversation_id": "conv-1"},
+            format="json",
+        )
+    assert resp.status_code == 400
+    assert "ElevenLabs" in resp.data["error"]

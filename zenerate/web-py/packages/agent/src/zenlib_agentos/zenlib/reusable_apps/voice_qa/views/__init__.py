@@ -106,6 +106,12 @@ class AgentViewSet(viewsets.ModelViewSet):
     def chat(self, request, pk=None):
         from zenlib.reusable_apps.multitenant import context
         agent = self.get_object()
+        if agent.target_type == Agent.TargetType.ELEVENLABS:
+            return Response(
+                {"error": "Live chat is not available for remote ElevenLabs agents. "
+                           "Use the ElevenLabs dashboard to test your agent directly."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         message = request.data.get("message", "")
         conversation_id = request.data.get("conversation_id")
         if not message:
@@ -142,11 +148,11 @@ class AgentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="run-evals")
     def run_evals(self, request, pk=None):
-        """Spawn parallel sub-agents: one per scenario, all dispatched simultaneously via Celery group.
+        """Run all scenarios against this agent in parallel via a Celery group.
 
         Body (optional):
           scenario_names: ["s1", "s2"]  — subset; omit to run all scenarios
-          mode: "text" | "audio"         — default text
+          mode: "text"                  — reserved; ElevenLabs agents always use remote mode
         """
         from zenlib.reusable_apps.multitenant import context
         agent = self.get_object()

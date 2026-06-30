@@ -6,6 +6,7 @@ from ..models import (
     AlertConfig, AlertEvent,
 )
 from ..services.quirks import parse_step
+from ..services.ssrf import is_safe_webhook_url
 
 
 class AgentSerializer(serializers.ModelSerializer):
@@ -161,24 +162,10 @@ class TestRunSerializer(serializers.ModelSerializer):
 
 class AlertConfigSerializer(serializers.ModelSerializer):
     def validate_webhook_url(self, value):
-        import ipaddress
-        import socket
-        from urllib.parse import urlparse
-        parsed = urlparse(value)
-        if parsed.scheme not in ("http", "https"):
-            raise serializers.ValidationError("Webhook URL must use http or https.")
-        hostname = parsed.hostname or ""
-        # Block private/loopback/link-local hostnames by name
-        blocked_names = {"localhost", "metadata.google.internal", "169.254.169.254"}
-        if hostname.lower() in blocked_names:
-            raise serializers.ValidationError("Webhook URL must not target internal hosts.")
-        # Resolve and block private IP ranges; unresolvable hosts are not reachable
-        try:
-            ip = ipaddress.ip_address(socket.gethostbyname(hostname))
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-                raise serializers.ValidationError("Webhook URL must not target private or internal IP addresses.")
-        except socket.gaierror:
-            pass  # Host doesn't resolve → can't reach private services
+        if not is_safe_webhook_url(value):
+            raise serializers.ValidationError(
+                "Webhook URL must use http/https and must not target private or internal addresses."
+            )
         return value
 
     class Meta:

@@ -29,7 +29,10 @@ def score_transcript(transcript: list[dict], rubric: dict) -> list[dict]:
     formatted = _format_transcript(transcript)
 
     try:
-        client = anthropic.Anthropic()
+        # Explicit timeout + bounded retries: the SDK default is a 600s timeout
+        # with retries, so an API stall here would block run_scenario_task and
+        # leave the run wedged in "running" (UI shows "scoring with Claude Sonnet").
+        client = anthropic.Anthropic(timeout=30.0, max_retries=1)
         resp = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=1024,
