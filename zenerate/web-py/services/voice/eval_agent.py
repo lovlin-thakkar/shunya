@@ -3,7 +3,7 @@ Pipecat-powered eval agent for testing remote ElevenLabs Conversational AI agent
 
 Architecture (WorkerRunner):
   EvalAgent (BaseWorker) — orchestrator, root worker
-    ├── EvalBridge (PipelineWorker) — DailyTransport, joins room as "Shunya Eval"
+    ├── EvalBridge — raw daily.CallClient, joins room as "Shunya Eval"
     └── ScoringSubAgent × N (BaseWorker) — concurrent scoring via bus jobs
 
 Replaces remote_caller_daily_bot.py, remote_caller_bot.py, judge_subagent.py.
@@ -20,13 +20,8 @@ import uuid
 import httpx
 import websockets
 from anthropic import AsyncAnthropic
-from pipecat.frames.frames import AudioRawFrame
 from pipecat.workers.base_worker import BaseWorker
 from pipecat.pipeline.job_decorator import job
-from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.worker import PipelineWorker, PipelineParams
-from pipecat.pipeline.worker_ready_decorator import worker_ready
-from pipecat.transports.daily.transport import DailyParams, DailyTransport
 from pipecat.workers.runner import WorkerRunner
 
 from audio_utils import synthesize_tts, write_mixed_wav, BYTES_PER_SEC
@@ -113,23 +108,62 @@ class ScoringSubAgent(BaseWorker):
             return {}
 
 
-class EvalBridge(PipelineWorker):
-    """Pipeline worker that joins a Daily room as "Shunya Eval".
+class EvalBridge:
+    """Joins a Daily room as "Shunya Eval" and pushes raw PCM audio to it.
 
-    Audio is pushed via ``queue_frame()`` and played to the room by the
-    DailyTransport output processor. No input/STT/LLM — pure audio output.
+    Uses raw ``daily.CallClient`` + virtual microphone device (matching the
+    pattern in ``caller_bot.py``) instead of ``DailyTransport``, because
+    ``Daily.init()`` is already called by ``caller_server.py`` at module load
+    time — a second call from ``DailyTransport`` would panic.
     """
 
-    def __init__(self, name: str, room_url: str, room_token: str):
-        transport = DailyTransport(
-            room_url,
-            room_token,
-            "Shunya Eval",
-            DailyParams(audio_out_enabled=True, audio_in_enabled=False),
+    def __init__(self, room_url: str, room_token: str, device_tag: str = ""):
+        self.room_url = room_url
+        self.room_token = room_token
+        self._device_tag = device_tag or uuid.uuid4().hex[:8]
+        self._call_client = None
+        self._mic = None
+        self._joined = asyncio.Event()
+
+    async def join(self):
+        from daily import CallClient, Daily, EventHandler
+
+        bridge = self
+
+        class Handler(EventHandler):
+            def on_call_state_updated(self, state):
+                if state == "joined":
+                    bridge._joined.set()
+
+            def on_error(self, message):
+                logger.error("EvalBridge Daily error: %s", message)
+
+        mic_name = f"eval-mic-{self._device_tag}"
+        self._mic = Daily.create_microphone_device(
+            mic_name, sample_rate=16000, channels=1, non_blocking=True,
         )
-        pipeline = Pipeline([transport.output()])
-        super().__init__(name=name, pipeline=pipeline, params=PipelineParams())
-        self._transport = transport
+        self._call_client = CallClient(event_handler=Handler())
+        self._call_client.join(
+            self.room_url,
+            meeting_token=self.room_token,
+            client_settings={
+                "inputs": {
+                    "microphone": {"isEnabled": True, "settings": {"deviceId": mic_name}},
+                    "camera": {"isEnabled": False},
+                },
+            },
+        )
+        await asyncio.wait_for(self._joined.wait(), timeout=15)
+
+    async def send_audio(self, pcm: bytes):
+        if self._mic:
+            self._mic.write_frames(pcm)
+            await asyncio.sleep(0)
+
+    async def leave(self):
+        if self._call_client:
+            self._call_client.leave()
+            self._call_client = None
 
 
 class EvalAgent(BaseWorker):
@@ -193,7 +227,6 @@ class EvalAgent(BaseWorker):
         self._agent_speech_start_ts: float = 0.0
         self._last_agent_audio_ts: float = 0.0
         self._caller_done_ts: float = 0.0
-        self._bridge_ready = asyncio.Event()
 
         self.recording_file: str | None = None
         self.closed_reason: str = ""
@@ -202,10 +235,6 @@ class EvalAgent(BaseWorker):
 
     async def on_activated(self, args: dict | None = None) -> None:
         asyncio.create_task(self._run())
-
-    @worker_ready(name="bridge")
-    async def on_bridge_ready(self, data) -> None:
-        self._bridge_ready.set()
 
     async def _run(self):
         try:
@@ -216,10 +245,8 @@ class EvalAgent(BaseWorker):
 
             # Optional Daily bridge — only when room_url provided
             if self.room_url and self.room_token:
-                bridge_name = f"bridge-{uuid.uuid4().hex[:6]}"
-                self._bridge = EvalBridge(bridge_name, self.room_url, self.room_token)
-                await self.add_workers(self._bridge)
-                await asyncio.wait_for(self._bridge_ready.wait(), timeout=15)
+                self._bridge = EvalBridge(self.room_url, self.room_token, device_tag=uuid.uuid4().hex[:6])
+                await self._bridge.join()
             else:
                 logger.info("No Daily room — running WS-only (no live listen-in)")
 
@@ -311,9 +338,7 @@ class EvalAgent(BaseWorker):
                         self._agent_audio_started = True
                         self._agent_speech_start_ts = now
                     if self._bridge:
-                        await self._bridge.queue_frame(
-                            AudioRawFrame(audio=pcm, sample_rate=16000, num_channels=1)
-                        )
+                        await self._bridge.send_audio(pcm)
                     continue
                 if mtype == "agent_response":
                     text = msg.get("agent_response_event", {}).get("agent_response", "")
@@ -361,9 +386,7 @@ class EvalAgent(BaseWorker):
         if not self._ws:
             return
         if self._bridge:
-            await self._bridge.queue_frame(
-                AudioRawFrame(audio=pcm, sample_rate=16000, num_channels=1)
-            )
+            await self._bridge.send_audio(pcm)
         for i in range(0, len(pcm), SEND_FRAME_BYTES):
             frame = pcm[i:i + SEND_FRAME_BYTES]
             await self._ws.send(json.dumps({
