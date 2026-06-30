@@ -51,6 +51,13 @@ GREETING_SILENCE_GAP = 2.5
 LIVE_MODEL = "claude-sonnet-4-6"
 PASS_THRESHOLD = 0.7
 
+# daily-python allows only ONE active CallClient per process (same restriction that
+# forced the caller bot into a separate process from the pipecat server).
+# EvalBridge creates a CallClient each time; a second run would disrupt the first
+# room's audio and inject the second run's audio into it.  Guard with a module-level
+# flag — asyncio is single-threaded so no lock is needed.
+_daily_bridge_in_use: bool = False
+
 SCORE_SYSTEM_PROMPT = (
     "You are a live QA scorer for a voice AI agent under test. Given the "
     "conversation so far, score the AGENT (not the caller) on each rubric "
@@ -242,6 +249,13 @@ class EvalAgent:
         self._agent_speech_start_ts: float = 0.0
         self._last_agent_audio_ts: float = 0.0
         self._caller_done_ts: float = 0.0
+        # Virtual write cursor for agent audio in the WAV recording.
+        # ElevenLabs streams chunks faster than real-time (network burst), so
+        # using the arrival timestamp as the WAV offset causes all chunks to
+        # overlap. Instead we anchor to wall-clock on the first chunk of each
+        # agent turn and advance by each chunk's audio duration — preserving
+        # inter-turn spacing while keeping intra-turn audio sequential.
+        self._agent_write_cursor: float = 0.0
 
         self.recording_file: str | None = None
         self.closed_reason: str = ""
@@ -249,6 +263,9 @@ class EvalAgent:
     # -- entry point --------------------------------------------------------
 
     async def run(self) -> dict:
+        global _daily_bridge_in_use
+
+        bridge_acquired = False
         try:
             self._fields = (
                 list(self._rubric.keys())
@@ -260,10 +277,28 @@ class EvalAgent:
             self._scorer = Scorer(anthro_key, persona=persona)
 
             if self.room_url and self.room_token:
-                self._bridge = EvalBridge(
-                    self.room_url, self.room_token, device_tag=uuid.uuid4().hex[:6]
-                )
-                await self._bridge.join()
+                if _daily_bridge_in_use:
+                    # Another concurrent run already holds the single CallClient slot.
+                    # daily-python panics with two active clients in the same process,
+                    # which would also disrupt the first run's Daily room audio.
+                    # Run WS-only — the concurrent run keeps its live listen-in.
+                    logger.warning(
+                        "Another run is already using the Daily audio relay; "
+                        "this run will be WS-only (no live listen-in)."
+                    )
+                else:
+                    _daily_bridge_in_use = True
+                    bridge_acquired = True
+                    try:
+                        self._bridge = EvalBridge(
+                            self.room_url, self.room_token, device_tag=uuid.uuid4().hex[:6]
+                        )
+                        await self._bridge.join()
+                    except Exception as e:
+                        logger.warning("EvalBridge join failed (%s) — running WS-only", e)
+                        self._bridge = None
+                        _daily_bridge_in_use = False
+                        bridge_acquired = False
             else:
                 logger.info("No Daily room — running WS-only (no live listen-in)")
 
@@ -281,6 +316,7 @@ class EvalAgent:
                 greeting = await self._collect_agent_turn(
                     start_timeout=GREETING_TIMEOUT, is_greeting=True
                 )
+
                 if greeting:
                     self._append_agent_turn(greeting)
                     logger.info("Agent greeting: %s", greeting[:60])
@@ -306,6 +342,8 @@ class EvalAgent:
         finally:
             if self._bridge:
                 await self._bridge.leave()
+            if bridge_acquired:
+                _daily_bridge_in_use = False
             self.recording_file = write_mixed_wav(
                 self._recording_id, self._caller_frames, self._agent_frames
             )
@@ -354,11 +392,19 @@ class EvalAgent:
                         continue
                     pcm = base64.b64decode(b64)
                     now = time.monotonic()
-                    self._agent_frames.append((now - self._call_start_ts, pcm))
                     self._last_agent_audio_ts = now
                     if not self._agent_audio_started:
+                        # First chunk of this agent turn: anchor the write cursor
+                        # to the actual wall-clock position so inter-turn gaps in
+                        # the WAV reflect real silence (caller speaking, pauses, etc.)
                         self._agent_audio_started = True
                         self._agent_speech_start_ts = now
+                        self._agent_write_cursor = now - self._call_start_ts
+                    # Place at the sequential write cursor, then advance it by
+                    # this chunk's audio duration. This prevents intra-turn overlap
+                    # caused by ElevenLabs streaming chunks faster than real-time.
+                    self._agent_frames.append((self._agent_write_cursor, pcm))
+                    self._agent_write_cursor += len(pcm) / BYTES_PER_SEC
                     if self._bridge:
                         self._bridge.send_audio(pcm)
                     continue
@@ -379,42 +425,78 @@ class EvalAgent:
     # -- scenario driving ---------------------------------------------------
 
     async def _speak_loop(self):
-        for step in self.steps:
-            clean = step.get("text", step.get("raw", ""))
-            quirks = [q.get("tag", "") for q in step.get("quirks", [])]
+        # One keepalive task lives across the whole loop.
+        # It runs during two windows where we must NOT send actual speech:
+        #   (a) Scoring gap — after agent finishes, before next TTS synthesis
+        #   (b) TTS synthesis — HTTP call to ElevenLabs TTS (0.5-2s dead time)
+        # It is STOPPED before we send caller audio and stays stopped while the
+        # agent is responding.  Sending keepalive silence during the agent's
+        # response makes ElevenLabs record user and agent audio as simultaneous,
+        # causing overlap in their transcript player and the "Audio duration
+        # mismatch" warning.
+        _kp: asyncio.Task | None = None
 
-            caller_ts_ms = int((time.monotonic() - self._call_start_ts) * 1000)
-            self._transcript.append(
-                {"speaker": "caller", "text": clean, "ts_ms": caller_ts_ms, "quirks": quirks}
-            )
-            logger.info("Caller at +%dms: %s", caller_ts_ms, clean[:60])
+        def _start_kp():
+            nonlocal _kp
+            if _kp is None or _kp.done():
+                _kp = asyncio.create_task(self._silence_keepalive())
 
-            self._reset_agent_turn()
-
-            audio = await synthesize_tts(clean, self._caller_voice_id, self._tts_key)
-            if audio:
-                caller_offset = time.monotonic() - self._call_start_ts
-                self._caller_frames.append((caller_offset, audio))
-                await self._send_caller_audio(audio)
-            else:
-                logger.warning("No audio for step: %s", clean[:40])
-            self._caller_done_ts = time.monotonic()
-
-            # Keep sending silence so ElevenLabs server-side VAD sees sustained
-            # end-of-turn and fires a response even on slow calls.
-            keepalive = asyncio.create_task(self._silence_keepalive())
-            try:
-                text = await self._collect_agent_turn(start_timeout=RESPONSE_TIMEOUT)
-            finally:
-                keepalive.cancel()
+        async def _stop_kp():
+            nonlocal _kp
+            if _kp and not _kp.done():
+                _kp.cancel()
                 try:
-                    await keepalive
+                    await _kp
                 except (asyncio.CancelledError, Exception):
                     pass
+            _kp = None
 
-            if text:
-                self._append_agent_turn(text)
+        try:
+            for step in self.steps:
+                clean = step.get("text", step.get("raw", ""))
+                quirks = [q.get("tag", "") for q in step.get("quirks", [])]
+
+                caller_ts_ms = int((time.monotonic() - self._call_start_ts) * 1000)
+                self._transcript.append(
+                    {"speaker": "caller", "text": clean, "ts_ms": caller_ts_ms, "quirks": quirks}
+                )
+                logger.info("Caller at +%dms: %s", caller_ts_ms, clean[:60])
+
+                self._reset_agent_turn()
+
+                # Window (a)+(b): keepalive bridges scoring gap → TTS synthesis.
+                # If this is the first step, _kp is None so we start it now.
+                _start_kp()
+                audio = await synthesize_tts(clean, self._caller_voice_id, self._tts_key)
+
+                # Stop keepalive BEFORE sending caller audio — two senders racing
+                # on the same WebSocket would interleave frames unpredictably.
+                await _stop_kp()
+
+                if audio:
+                    caller_offset = time.monotonic() - self._call_start_ts
+                    self._caller_frames.append((caller_offset, audio))
+                    await self._send_caller_audio(audio)
+                else:
+                    logger.warning("No audio for step: %s", clean[:40])
+                self._caller_done_ts = time.monotonic()
+
+                # Agent response window — no keepalive. ElevenLabs VAD already fired
+                # from our trailing silence; keepalive here would inject user audio
+                # during the agent's turn, causing overlap in their transcript.
+                text = await self._collect_agent_turn(start_timeout=RESPONSE_TIMEOUT)
+
+                if text:
+                    self._append_agent_turn(text)
+
+                # Start keepalive immediately so it covers the scoring Anthropic
+                # call (1-3s) — no gap between this agent turn and the next caller turn.
+                _start_kp()
                 await self._dispatch_scoring()
+                # Loop continues: next iteration calls _start_kp() which is a no-op
+                # (keepalive already running), then awaits synthesize_tts.
+        finally:
+            await _stop_kp()
 
     async def _send_caller_audio(self, pcm: bytes):
         """Stream caller PCM to ElevenLabs WS and mirror to the Daily relay."""
@@ -438,8 +520,11 @@ class EvalAgent:
         )
 
     async def _silence_keepalive(self):
-        """Send silence frames to ElevenLabs WS while waiting for the agent to respond.
-        This ensures server-side VAD consistently fires even on slow-responding agents."""
+        """Send silence to fill inter-step gaps (scoring + TTS synthesis).
+
+        Runs only during windows where no real audio is being sent, so ElevenLabs
+        sees a continuous audio stream and their server-side VAD doesn't desync.
+        Must NOT run while the agent is responding — see _speak_loop for timing."""
         frame = base64.b64encode(b"\x00" * SEND_FRAME_BYTES).decode("ascii")
         try:
             while True:
@@ -452,14 +537,15 @@ class EvalAgent:
     async def _collect_agent_turn(
         self, start_timeout: float, is_greeting: bool = False
     ) -> str:
-        # Check if the agent already responded during the TTS synthesis / audio send
-        # phase (fast agents can respond before we even reach this method). Snapshot
-        # the value before clearing so a real early response is not discarded.
-        snapshot = self._agent_text.strip()
-        self._agent_text = ""
-        if snapshot and not is_greeting:
-            logger.info("Agent responded during caller audio phase — using early response")
-            return snapshot
+        # For non-greeting turns: check if the agent already responded during the
+        # TTS synthesis / audio send phase (fast agents can respond before we reach
+        # this method). Snapshot first so the text is not lost when we clear.
+        if not is_greeting:
+            snapshot = self._agent_text.strip()
+            self._agent_text = ""
+            if snapshot:
+                logger.info("Agent responded during caller audio phase — using early response")
+                return snapshot
 
         deadline = time.monotonic() + start_timeout
         while time.monotonic() < deadline:
@@ -564,6 +650,8 @@ class EvalAgent:
         self._agent_audio_started = False
         self._agent_speech_start_ts = 0.0
         self._last_agent_audio_ts = 0.0
+        # _agent_write_cursor is NOT reset here — it will be re-anchored to
+        # wall-clock on the next turn's first chunk (in _receive_loop).
 
 
 async def run_eval_agent(
