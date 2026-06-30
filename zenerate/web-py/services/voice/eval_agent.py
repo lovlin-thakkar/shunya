@@ -1,14 +1,19 @@
 """
-Pipecat-powered eval agent for testing remote ElevenLabs Conversational AI agents.
+Eval agent for testing remote ElevenLabs Conversational AI agents.
 
-Architecture (WorkerRunner):
-  EvalAgent (BaseWorker) — orchestrator, root worker
-    ├── EvalBridge — raw daily.CallClient, joins room as "Shunya Eval"
-    └── ScoringSubAgent × N (BaseWorker) — concurrent scoring via bus jobs
+EvalAgent is a plain async class (no Pipecat BaseWorker / WorkerRunner). The
+previous WorkerRunner-based implementation was dropped because:
+  - self.job() / send_job_response do not exist on BaseWorker → scoring silently
+    never ran (AttributeError swallowed by the outer try/except)
+  - on_activated() returned before _run() finished → run_eval_agent() could
+    return empty results before the call completed
 
-Pipecat-worker-based reimplementation of the remote ElevenLabs agent caller.
-Replaces the earlier standalone WS+Daily relay bot approach with a proper
-WorkerRunner + BaseWorker architecture and concurrent scoring sub-agents.
+Current architecture:
+  - EvalAgent._run() is awaited directly
+  - ScoringSubAgents are plain async objects; _score() is called directly
+  - All rubric fields are scored concurrently via asyncio.gather, then ALL
+    results are posted to Django in a single request (avoids the race where
+    concurrent per-field POSTs overwrote each other in LiveScoresView)
 """
 
 import asyncio
@@ -23,11 +28,8 @@ import uuid
 import httpx
 import websockets
 from anthropic import AsyncAnthropic
-from pipecat.workers.base_worker import BaseWorker
-from pipecat.pipeline.job_decorator import job
-from pipecat.workers.runner import WorkerRunner
 
-from audio_utils import synthesize_tts, write_mixed_wav, BYTES_PER_SEC
+from audio_utils import synthesize_tts, write_mixed_wav, BYTES_PER_SEC, ElevenLabsQuotaError
 from config import CALLER_DEFAULT_VOICE_ID
 
 logger = logging.getLogger(__name__)
@@ -39,9 +41,14 @@ TRAILING_SILENCE_BYTES = 16000
 GREETING_TIMEOUT = 12.0
 RESPONSE_TIMEOUT = 30.0
 COLLECT_WINDOW = 20.0
-SILENCE_GAP = 1.2
+# Normal agent turn: exit after this much trailing silence.
+SILENCE_GAP = 1.5
+# Greeting: ElevenLabs TTS has natural inter-sentence pauses of 1.5–2.5s;
+# a too-short gap exits mid-greeting and causes the first caller turn to
+# overlap with the second half of the greeting in the WAV recording.
+GREETING_SILENCE_GAP = 2.5
 
-LIVE_MODEL = "claude-haiku-4-5-20251001"
+LIVE_MODEL = "claude-sonnet-4-6"
 PASS_THRESHOLD = 0.7
 
 SCORE_SYSTEM_PROMPT = (
@@ -52,39 +59,18 @@ SCORE_SYSTEM_PROMPT = (
 )
 
 
-class ScoringSubAgent(BaseWorker):
-    """Bus-based sub-agent that scores rubric dimensions via Anthropic.
+class Scorer:
+    """Scores one or more rubric fields against a transcript via Anthropic."""
 
-    Receives ``score`` jobs from the parent EvalAgent after each agent turn.
-    Multiple ScoringSubAgents may run concurrently for different dimensions.
-    """
-
-    def __init__(self, name: str, anthropic_api_key: str, persona: str = ""):
-        super().__init__(name=name)
+    def __init__(self, anthropic_api_key: str, persona: str = ""):
         self._client = (
             AsyncAnthropic(api_key=anthropic_api_key) if anthropic_api_key else None
         )
         self._persona = persona or ""
 
-    @job(name="score")
-    async def on_score(self, message):
-        if not self._client:
-            await self.send_job_response(
-                message.job_id, {"error": "no api key"}, status="FAILED"
-            )
-            return
-        fields = message.payload.get("fields", [])
-        transcript = message.payload.get("transcript", [])
-        try:
-            scores = await self._score(transcript, fields)
-            await self.send_job_response(message.job_id, scores)
-        except Exception as e:
-            logger.warning("Scoring failed: %s", e)
-            await self.send_job_response(
-                message.job_id, {"error": str(e)}, status="FAILED"
-            )
-
-    async def _score(self, transcript: list[dict], fields: list[str]) -> dict:
+    async def score(self, transcript: list[dict], fields: list[str]) -> dict:
+        if not self._client or not fields:
+            return {}
         convo = "\n".join(
             f"{t.get('speaker', '?').upper()}: {t.get('text', '')}" for t in transcript
         )
@@ -94,27 +80,31 @@ class ScoringSubAgent(BaseWorker):
             f"Conversation so far:\n{convo}\n\n"
             'Return JSON: {"<dimension>": {"score": 0.0, "reason": "<=10 words"}, ...}'
         )
-        resp = await self._client.messages.create(
-            model=LIVE_MODEL,
-            max_tokens=400,
-            system=SCORE_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user}],
-        )
-        text = resp.content[0].text if resp.content else "{}"
-        return ScoringSubAgent._parse_json(text)
-
-    @staticmethod
-    def _parse_json(text: str) -> dict:
         try:
-            return json.loads(text)
-        except (ValueError, TypeError):
-            m = re.search(r"\{.*\}", text, re.DOTALL)
-            if m:
-                try:
-                    return json.loads(m.group(0))
-                except (ValueError, TypeError):
-                    return {}
+            resp = await self._client.messages.create(
+                model=LIVE_MODEL,
+                max_tokens=400,
+                system=SCORE_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user}],
+            )
+            text = resp.content[0].text if resp.content else "{}"
+            return _parse_json(text)
+        except Exception as e:
+            logger.warning("Scoring failed: %s", e)
             return {}
+
+
+def _parse_json(text: str) -> dict:
+    try:
+        return json.loads(text)
+    except (ValueError, TypeError):
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except (ValueError, TypeError):
+                return {}
+        return {}
 
 
 class EvalBridge:
@@ -138,11 +128,14 @@ class EvalBridge:
         from daily import CallClient, Daily, EventHandler
 
         bridge = self
+        # Capture the running event loop so the Daily callback thread can
+        # safely signal it (asyncio.Event.set() is not thread-safe).
+        loop = asyncio.get_running_loop()
 
         class Handler(EventHandler):
             def on_call_state_updated(self, state):
                 if state == "joined":
-                    bridge._joined.set()
+                    loop.call_soon_threadsafe(bridge._joined.set)
 
             def on_error(self, message):
                 logger.error("EvalBridge Daily error: %s", message)
@@ -170,33 +163,40 @@ class EvalBridge:
         )
         await asyncio.wait_for(self._joined.wait(), timeout=15)
 
-    async def send_audio(self, pcm: bytes):
-        if self._mic:
-            self._mic.write_frames(pcm)
-            await asyncio.sleep(0)
+    def send_audio(self, pcm: bytes):
+        """Write PCM to the Daily mic device (non-blocking; clocked out in real-time)."""
+        if self._mic and pcm:
+            if len(pcm) % 2:
+                pcm = pcm[:-1]
+            try:
+                self._mic.write_frames(pcm)
+            except Exception as e:
+                logger.warning("EvalBridge write_frames: %s", e)
 
     async def leave(self):
         if self._call_client:
-            self._call_client.leave()
+            try:
+                self._call_client.leave()
+            except Exception:
+                pass
             self._call_client = None
 
 
-class EvalAgent(BaseWorker):
-    """Root Pipecat worker that orchestrates a remote ElevenLabs agent test run.
+class EvalAgent:
+    """Orchestrates a remote ElevenLabs agent test run.
 
     Lifecycle:
-      1. Activated by WorkerRunner → spawns ``_run()`` background task
-      2. Adds EvalBridge (Daily room) and ScoringSubAgents as children
-      3. Connects to ElevenLabs Conversational AI WebSocket
+      1. Joins the Daily room (if room_url provided) — observers can listen live
+      2. Connects to ElevenLabs Conversational AI WebSocket
+      3. Collects agent greeting
       4. Drives scenario steps (TTS → WS + Daily room)
-      5. After each agent turn dispatches scoring jobs to sub-agents
-      6. Posts aggregated scores to Django
-      7. Calls ``end()`` to signal completion
+      5. After each agent turn: scores all rubric fields concurrently, posts
+         aggregated results to Django in one atomic update
+      6. Writes mixed-mono WAV recording
     """
 
     def __init__(
         self,
-        name: str,
         el_agent_id: str,
         steps: list[dict],
         room_url: str = "",
@@ -212,7 +212,6 @@ class EvalAgent(BaseWorker):
         django_url: str = "",
         service_token: str = "",
     ):
-        super().__init__(name=name)
         self.el_agent_id = el_agent_id
         self.steps = steps
         self.room_url = room_url
@@ -229,7 +228,8 @@ class EvalAgent(BaseWorker):
         self._service_token = service_token or ""
 
         self._bridge: EvalBridge | None = None
-        self._scorers: list[ScoringSubAgent] = []
+        self._scorer: Scorer | None = None
+        self._fields: list[str] = []
 
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._call_start_ts: float = 0.0
@@ -246,22 +246,19 @@ class EvalAgent(BaseWorker):
         self.recording_file: str | None = None
         self.closed_reason: str = ""
 
-    # -- lifecycle -------------------------------------------------------
+    # -- entry point --------------------------------------------------------
 
-    async def on_activated(self, args: dict | None = None) -> None:
-        asyncio.create_task(self._run())
-
-    async def _run(self):
+    async def run(self) -> dict:
         try:
-            fields = (
-                [f for f in self._rubric]
+            self._fields = (
+                list(self._rubric.keys())
                 if self._rubric
                 else ["instruction_following", "goal_completion", "csat_tone", "safety"]
             )
             persona = self.steps[0].get("persona", "") if self.steps else ""
             anthro_key = os.environ.get("ANTHROPIC_API_KEY", "")
+            self._scorer = Scorer(anthro_key, persona=persona)
 
-            # Optional Daily bridge — only when room_url provided
             if self.room_url and self.room_token:
                 self._bridge = EvalBridge(
                     self.room_url, self.room_token, device_tag=uuid.uuid4().hex[:6]
@@ -269,11 +266,6 @@ class EvalAgent(BaseWorker):
                 await self._bridge.join()
             else:
                 logger.info("No Daily room — running WS-only (no live listen-in)")
-
-            for field in fields:
-                scorer = ScoringSubAgent(f"scorer-{field}", anthro_key, persona=persona)
-                self._scorers.append(scorer)
-                await self.add_workers(scorer)
 
             ws_url = await self._resolve_ws_url()
             async with websockets.connect(ws_url, max_size=32 * 1024 * 1024) as ws:
@@ -305,15 +297,26 @@ class EvalAgent(BaseWorker):
                 except (asyncio.CancelledError, Exception):
                     pass
 
-            self.recording_file = write_mixed_wav(
-                self._recording_id, self._caller_frames, self._agent_frames
-            )
+        except ElevenLabsQuotaError:
+            # Re-raise quota errors so caller_server returns 500 → Celery marks
+            # the TestRun as failed. Continuing with empty transcript is misleading.
+            raise
         except Exception as e:
             logger.exception("Eval agent failed: %s", e)
         finally:
-            await self.end()
+            if self._bridge:
+                await self._bridge.leave()
+            self.recording_file = write_mixed_wav(
+                self._recording_id, self._caller_frames, self._agent_frames
+            )
 
-    # -- ElevenLabs WebSocket -------------------------------------------
+        return {
+            "transcript": self._transcript,
+            "recording_file": self.recording_file,
+            "closed_reason": self.closed_reason,
+        }
+
+    # -- ElevenLabs WebSocket -----------------------------------------------
 
     async def _resolve_ws_url(self) -> str:
         public_url = f"{CONVAI_WS_BASE}?agent_id={self.el_agent_id}"
@@ -335,7 +338,6 @@ class EvalAgent(BaseWorker):
             return public_url
 
     async def _receive_loop(self):
-        """Read WS messages from the ElevenLabs agent."""
         try:
             async for raw in self._ws:
                 msg = json.loads(raw)
@@ -358,7 +360,7 @@ class EvalAgent(BaseWorker):
                         self._agent_audio_started = True
                         self._agent_speech_start_ts = now
                     if self._bridge:
-                        await self._bridge.send_audio(pcm)
+                        self._bridge.send_audio(pcm)
                     continue
                 if mtype == "agent_response":
                     text = msg.get("agent_response_event", {}).get("agent_response", "")
@@ -374,7 +376,7 @@ class EvalAgent(BaseWorker):
         except (websockets.ConnectionClosed, asyncio.CancelledError):
             return
 
-    # -- scenario driving -----------------------------------------------
+    # -- scenario driving ---------------------------------------------------
 
     async def _speak_loop(self):
         for step in self.steps:
@@ -383,12 +385,7 @@ class EvalAgent(BaseWorker):
 
             caller_ts_ms = int((time.monotonic() - self._call_start_ts) * 1000)
             self._transcript.append(
-                {
-                    "speaker": "caller",
-                    "text": clean,
-                    "ts_ms": caller_ts_ms,
-                    "quirks": quirks,
-                }
+                {"speaker": "caller", "text": clean, "ts_ms": caller_ts_ms, "quirks": quirks}
             )
             logger.info("Caller at +%dms: %s", caller_ts_ms, clean[:60])
 
@@ -403,45 +400,66 @@ class EvalAgent(BaseWorker):
                 logger.warning("No audio for step: %s", clean[:40])
             self._caller_done_ts = time.monotonic()
 
-            text = await self._collect_agent_turn(start_timeout=RESPONSE_TIMEOUT)
+            # Keep sending silence so ElevenLabs server-side VAD sees sustained
+            # end-of-turn and fires a response even on slow calls.
+            keepalive = asyncio.create_task(self._silence_keepalive())
+            try:
+                text = await self._collect_agent_turn(start_timeout=RESPONSE_TIMEOUT)
+            finally:
+                keepalive.cancel()
+                try:
+                    await keepalive
+                except (asyncio.CancelledError, Exception):
+                    pass
+
             if text:
                 self._append_agent_turn(text)
                 await self._dispatch_scoring()
 
     async def _send_caller_audio(self, pcm: bytes):
-        """Stream caller PCM to ElevenLabs WS and optionally to Daily room."""
+        """Stream caller PCM to ElevenLabs WS and mirror to the Daily relay."""
         if not self._ws:
             return
+        # Write full audio to Daily relay upfront — the non-blocking mic device
+        # buffers it and clocks it out in real-time, staying in sync with the WS pacing.
         if self._bridge:
-            await self._bridge.send_audio(pcm)
+            self._bridge.send_audio(pcm)
+        # Pace frames to ElevenLabs in real-time so server-side VAD perceives natural speech.
         for i in range(0, len(pcm), SEND_FRAME_BYTES):
-            frame = pcm[i : i + SEND_FRAME_BYTES]
+            frame = pcm[i: i + SEND_FRAME_BYTES]
             await self._ws.send(
-                json.dumps(
-                    {
-                        "user_audio_chunk": base64.b64encode(frame).decode("ascii"),
-                    }
-                )
+                json.dumps({"user_audio_chunk": base64.b64encode(frame).decode("ascii")})
             )
             await asyncio.sleep(len(frame) / BYTES_PER_SEC)
         await self._ws.send(
             json.dumps(
-                {
-                    "user_audio_chunk": base64.b64encode(
-                        b"\x00" * TRAILING_SILENCE_BYTES
-                    ).decode("ascii"),
-                }
+                {"user_audio_chunk": base64.b64encode(b"\x00" * TRAILING_SILENCE_BYTES).decode("ascii")}
             )
         )
+
+    async def _silence_keepalive(self):
+        """Send silence frames to ElevenLabs WS while waiting for the agent to respond.
+        This ensures server-side VAD consistently fires even on slow-responding agents."""
+        frame = base64.b64encode(b"\x00" * SEND_FRAME_BYTES).decode("ascii")
+        try:
+            while True:
+                if self._ws:
+                    await self._ws.send(json.dumps({"user_audio_chunk": frame}))
+                await asyncio.sleep(SEND_FRAME_BYTES / BYTES_PER_SEC)
+        except (asyncio.CancelledError, websockets.ConnectionClosed):
+            return
 
     async def _collect_agent_turn(
         self, start_timeout: float, is_greeting: bool = False
     ) -> str:
-        # Clear at the last moment so stale text from a previous turn that
-        # arrived late (between _reset_agent_turn and here) is not picked up
-        # as a response to the current step, which would cause the caller to
-        # speak multiple steps without actually waiting for the agent.
+        # Check if the agent already responded during the TTS synthesis / audio send
+        # phase (fast agents can respond before we even reach this method). Snapshot
+        # the value before clearing so a real early response is not discarded.
+        snapshot = self._agent_text.strip()
         self._agent_text = ""
+        if snapshot and not is_greeting:
+            logger.info("Agent responded during caller audio phase — using early response")
+            return snapshot
 
         deadline = time.monotonic() + start_timeout
         while time.monotonic() < deadline:
@@ -455,46 +473,49 @@ class EvalAgent(BaseWorker):
             await asyncio.sleep(0.05)
         else:
             if not is_greeting:
-                logger.warning("Timed out waiting for agent")
+                logger.warning("Timed out waiting for agent response")
             return ""
 
+        # Use a wider silence gap for the greeting: ElevenLabs TTS produces natural
+        # inter-sentence pauses of 1.5–2.5s, so 1.2s exits mid-greeting and causes
+        # the first caller turn to overlap with the trailing greeting audio in the recording.
+        gap = GREETING_SILENCE_GAP if is_greeting else SILENCE_GAP
         collect_deadline = time.monotonic() + COLLECT_WINDOW
         while time.monotonic() < collect_deadline:
             await asyncio.sleep(0.1)
             quiet_for = time.monotonic() - self._last_agent_audio_ts
-            if self._agent_audio_started and quiet_for > SILENCE_GAP:
+            if self._agent_audio_started and quiet_for > gap:
                 break
 
         return self._agent_text.strip()
 
-    # -- concurrent scoring via bus jobs ---------------------------------
+    # -- scoring ------------------------------------------------------------
 
     async def _dispatch_scoring(self):
-        if not self._scorers:
+        """Score all rubric fields concurrently, then POST all results in one request.
+
+        Scoring per field is concurrent (asyncio.gather) but the final POST is a single
+        call with all fields — avoiding the race where per-field POSTs overwrote each
+        other in LiveScoresView.
+        """
+        if not self._scorer or not self._fields:
             return
-        fields = (
-            list(self._rubric.keys())
-            if self._rubric
-            else ["instruction_following", "goal_completion", "csat_tone", "safety"]
-        )
         snapshot = list(self._transcript)
 
-        async def _score_one(scorer: ScoringSubAgent, field: str):
-            try:
-                async with self.job(
-                    scorer.name,
-                    name="score",
-                    payload={"fields": [field], "transcript": snapshot},
-                    timeout=20,
-                ) as j:
-                    async for _ in j:
-                        pass
-                    if j.response and "error" not in j.response:
-                        await self._post_scores(j.response)
-            except Exception as e:
-                logger.warning("Score dispatch failed for %s: %s", field, e)
+        # Score each field independently so partial failures don't block others.
+        results = await asyncio.gather(
+            *[self._scorer.score(snapshot, [field]) for field in self._fields],
+            return_exceptions=True,
+        )
 
-        await asyncio.gather(*[_score_one(s, f) for s, f in zip(self._scorers, fields)])
+        # Merge all field results into one dict.
+        merged: dict = {}
+        for res in results:
+            if isinstance(res, dict):
+                merged.update(res)
+
+        if merged:
+            await self._post_scores(merged)
 
     async def _post_scores(self, scores: dict):
         if not self._run_id or not self._django_url:
@@ -519,7 +540,7 @@ class EvalAgent(BaseWorker):
         if not normalized:
             return
         try:
-            async with httpx.AsyncClient(timeout=5) as c:
+            async with httpx.AsyncClient(timeout=15) as c:
                 await c.post(
                     f"{self._django_url}/internal/test-runs/{self._run_id}/live-scores/",
                     json={"turn": turn, "scores": normalized},
@@ -531,19 +552,12 @@ class EvalAgent(BaseWorker):
         except httpx.HTTPError as e:
             logger.warning("Score post failed: %s", e)
 
-    # -- helpers ---------------------------------------------------------
+    # -- helpers ------------------------------------------------------------
 
     def _append_agent_turn(self, text: str):
         start = self._agent_speech_start_ts or time.monotonic()
         ts = int((start - self._call_start_ts) * 1000)
-        self._transcript.append(
-            {
-                "speaker": "agent",
-                "text": text,
-                "ts_ms": ts,
-                "quirks": [],
-            }
-        )
+        self._transcript.append({"speaker": "agent", "text": text, "ts_ms": ts, "quirks": []})
 
     def _reset_agent_turn(self):
         self._agent_text = ""
@@ -568,9 +582,7 @@ async def run_eval_agent(
     django_url: str = "",
     service_token: str = "",
 ) -> dict:
-    """Convenience: create WorkerRunner + EvalAgent, run, return results."""
     agent = EvalAgent(
-        name=f"eval-{uuid.uuid4().hex[:6]}",
         el_agent_id=el_agent_id,
         steps=steps,
         room_url=room_url,
@@ -586,11 +598,4 @@ async def run_eval_agent(
         django_url=django_url,
         service_token=service_token,
     )
-    runner = WorkerRunner()
-    await runner.add_workers(agent)
-    await runner.run()
-    return {
-        "transcript": agent._transcript,
-        "recording_file": agent.recording_file,
-        "closed_reason": agent.closed_reason,
-    }
+    return await agent.run()

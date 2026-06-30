@@ -47,6 +47,7 @@ services:
       DB_NAME: zenapi
       REDIS_URL: redis://redis:6379/0
       PIPECAT_SERVER_URL: http://pipecat:8001
+      CALLER_SERVER_URL: http://caller:8002
     depends_on:
       db:
         condition: service_healthy

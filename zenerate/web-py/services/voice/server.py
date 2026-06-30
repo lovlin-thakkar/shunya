@@ -2,10 +2,12 @@
 FastAPI server for the Pipecat voice agent.
 Django calls /connect to provision a Daily room and start the pipeline.
 """
+
 import asyncio
 import os
 import time
 import logging
+import uuid
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -31,6 +33,7 @@ def _require_service_token(x_service_token: str = Header(default="")) -> None:
         raise HTTPException(status_code=500, detail="Service token not configured")
     if x_service_token != SERVICE_TOKEN:
         raise HTTPException(status_code=401, detail="Invalid service token")
+
 
 # Per-room readiness: set once the agent's TTS WebSocket is connected, so the
 # synthetic caller only starts after the agent can actually respond.
@@ -86,7 +89,7 @@ class ConnectRequest(BaseModel):
     system_prompt: str
     voice_id: str = DEFAULT_VOICE_ID
     greeting: str = ""
-    tenant_id: str = ""   # forwarded to /internal/ calls via X-Tenant-Id header
+    tenant_id: str = ""  # forwarded to /internal/ calls via X-Tenant-Id header
     room_name: str | None = None
 
 
@@ -106,7 +109,9 @@ async def connect(req: ConnectRequest):
     """
     global _active_pipeline_count
     if _active_pipeline_count >= MAX_CONCURRENT_PIPELINES:
-        logger.warning(f"Pipeline capacity full ({_active_pipeline_count}/{MAX_CONCURRENT_PIPELINES}), rejecting connect")
+        logger.warning(
+            f"Pipeline capacity full ({_active_pipeline_count}/{MAX_CONCURRENT_PIPELINES}), rejecting connect"
+        )
         raise HTTPException(
             status_code=429,
             detail=f"Pipeline at capacity ({_active_pipeline_count} active). Retry shortly.",
@@ -115,7 +120,7 @@ async def connect(req: ConnectRequest):
     # after this point will see the updated count.
     _active_pipeline_count += 1
 
-    room_name = req.room_name or f"shunya-{req.agent_id[:8]}-{int(asyncio.get_event_loop().time())}"
+    room_name = req.room_name or f"shunya-{req.agent_id[:8]}-{uuid.uuid4().hex[:12]}"
 
     try:
         room = await _create_daily_room(room_name)
@@ -164,14 +169,16 @@ async def connect(req: ConnectRequest):
 
     task.add_done_callback(_pipeline_done)
 
-    return JSONResponse({
-        "room_url": room_url,
-        "room_name": room_name,
-        "caller_token": caller_token,
-        # Pre-auth join link for any human observer (tenant, debugger).
-        # Open this URL in a browser during the test run to listen in.
-        "observer_url": f"{room_url}?t={observer_token}",
-    })
+    return JSONResponse(
+        {
+            "room_url": room_url,
+            "room_name": room_name,
+            "caller_token": caller_token,
+            # Pre-auth join link for any human observer (tenant, debugger).
+            # Open this URL in a browser during the test run to listen in.
+            "observer_url": f"{room_url}?t={observer_token}",
+        }
+    )
 
 
 class CallerRunRequest(BaseModel):
@@ -217,7 +224,9 @@ async def caller_run(req: CallerRunRequest):
             return JSONResponse(r.json())
     except httpx.HTTPStatusError as e:
         logger.error(f"Caller service error: {e.response.text}")
-        raise HTTPException(status_code=502, detail=f"Caller service: {e.response.text}")
+        raise HTTPException(
+            status_code=502, detail=f"Caller service: {e.response.text}"
+        )
     except (httpx.ConnectError, httpx.TimeoutException) as e:
         logger.error(f"Caller service unreachable: {e}")
         raise HTTPException(status_code=503, detail=f"Caller service unreachable: {e}")

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { StatusBadge } from "./status-badge";
-import { CheckCircle2, XCircle, AlertTriangle, Loader2, ArrowRight, Mic, MessageSquare } from "lucide-react";
+import { CheckCircle2, XCircle, ArrowRight, Mic, MessageSquare, AlertTriangle } from "lucide-react";
 import type { TestRun } from "@/lib/types";
 import { formatDistanceToNow } from "@/lib/time";
 
@@ -59,7 +59,6 @@ export function RunsTable({ runs, showAgent }: Props) {
             const result = run.result;
             const scores = result?.scores ?? [];
             const nPass = scores.filter((s) => s.passed).length;
-            const judging = run.status === "completed" && result && scores.length === 0;
             const last = idx === runs.length - 1;
 
             return (
@@ -131,12 +130,7 @@ export function RunsTable({ runs, showAgent }: Props) {
                 </td>
 
                 <td className="py-3 pr-5">
-                  {judging ? (
-                    <span className="inline-flex items-center gap-1.5 text-xs" style={{ color: "var(--amber)" }}>
-                      <Loader2 size={10} className="spin" />
-                      Judging
-                    </span>
-                  ) : scores.length > 0 ? (
+                  {scores.length > 0 ? (
                     <span className="font-mono text-xs">
                       <span style={{ color: "var(--green)", fontWeight: 600 }}>{nPass}</span>
                       <span style={{ color: "var(--ink-3)" }}>/{scores.length}</span>

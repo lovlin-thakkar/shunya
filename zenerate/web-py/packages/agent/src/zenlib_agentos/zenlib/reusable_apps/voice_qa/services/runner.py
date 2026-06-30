@@ -3,8 +3,9 @@ import uuid
 
 from django.utils import timezone
 
-from ..models import TestRun, TestResult
+from ..models import TestRun, TestResult, JudgeScore
 from .caller import get_caller
+from zenlib.reusable_apps.multitenant import context
 
 logger = logging.getLogger(__name__)
 
@@ -59,15 +60,18 @@ def run_scenario(test_run_id: str):
                 transcript_turns.append({"speaker": "agent", "text": result["response"], "ts_ms": result.get("ts_ms", 0), "quirks": []})
 
         assertion_results = _evaluate_assertions(run.scenario.assertions, transcript_turns, run.agent)
-        assertions_passed = all(a["passed"] for a in assertion_results)
+        # Skip None (semantic assertions pending LLM evaluation) — treat as neutral.
+        # all() on an empty sequence returns True, correct when all assertions are semantic.
+        assertions_passed = all(
+            a["passed"] for a in assertion_results if a["passed"] is not None
+        )
 
         test_result = TestResult.objects.create(
             test_run=run, passed=assertions_passed,
             transcript=transcript_turns, assertion_results=assertion_results,
         )
 
-        from ..tasks import run_judge_task
-        run_judge_task.delay(str(test_result.id), run.scenario.rubric, run.agent.tenant_id)
+        _promote_live_scores(run, test_result)
 
         run.status = TestRun.Status.COMPLETED
         run.completed_at = timezone.now()
@@ -98,6 +102,57 @@ def run_scenario(test_run_id: str):
             run.save(update_fields=["status", "completed_at", "error_message"])
         except Exception:
             pass  # run may have been deleted; nothing to do
+
+
+def _promote_live_scores(run: TestRun, test_result: TestResult):
+    """Promote the final live scores (Sonnet, written during the call) to
+    permanent JudgeScore rows on the TestResult.
+
+    live_scores is refreshed from the DB to ensure we get the last batch
+    written by the eval agent after the final agent turn. If no scores exist
+    (text mode, or live scoring not wired up) this is a no-op.
+    """
+    run.refresh_from_db(fields=["live_scores"])
+    raw_scores = (run.live_scores or {}).get("scores") or []
+    if not raw_scores:
+        return
+
+    tenant = context.current_tenant.get()
+    rubric = run.scenario.rubric or {}
+
+    judge_scores = []
+    for s in raw_scores:
+        field = s.get("field", "")
+        if not field:
+            continue
+        try:
+            score = max(0.0, min(1.0, float(s.get("score", 0.0))))
+        except (TypeError, ValueError):
+            continue
+        judge_scores.append(JudgeScore(
+            test_result=test_result,
+            field=field,
+            score=round(score, 2),
+            reasoning=str(s.get("reasoning", ""))[:500],
+            passed=bool(s.get("passed", score >= 0.7)),
+            tenant=tenant,
+        ))
+
+    if not judge_scores:
+        return
+
+    JudgeScore.objects.bulk_create(judge_scores, ignore_conflicts=True)
+
+    weights = [rubric.get(js.field, 1.0) for js in judge_scores]
+    total_weight = sum(weights) or 1.0
+    weighted_avg = sum(js.score * w for js, w in zip(judge_scores, weights)) / total_weight
+    test_result.passed = test_result.passed and weighted_avg >= 0.7
+    test_result.save(update_fields=["passed"])
+
+    logger.info(
+        "Promoted %d live scores to JudgeScore rows for TestResult %s (weighted avg %.2f)",
+        len(judge_scores), test_result.id, weighted_avg,
+    )
 
 
 # Assertions evaluated by fast regex/counter checks on the transcript.

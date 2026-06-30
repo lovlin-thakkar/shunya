@@ -20,9 +20,7 @@ export default function TestRunPage({ params }: Props) {
       refreshInterval: (run) => {
         if (!run) return 3000;
         if (run.status === "queued" || run.status === "running") return 2000;
-        if (run.status === "failed") return 0;
-        const judging = run.status === "completed" && run.result && (run.result.scores?.length ?? 0) === 0;
-        return judging ? 4000 : 0;
+        return 0;
       },
     }
   );
@@ -53,7 +51,6 @@ export default function TestRunPage({ params }: Props) {
   const scores = result?.scores ?? [];
   const liveScores = run.live_scores?.scores ?? [];
   const liveTurn = run.live_scores?.turn;
-  const judging = run.status === "completed" && result && scores.length === 0;
   const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
   return (
@@ -249,31 +246,12 @@ export default function TestRunPage({ params }: Props) {
                   ))}
                 </div>
                 <p className="text-xs mt-4" style={{ color: "var(--ink-3)" }}>
-                  Indicative live scores — final judge scores are written after the call.
+                  Scores update after each agent turn using Claude Sonnet.
                 </p>
               </div>
             ) : (
               <p className="text-sm" style={{ color: "var(--ink-3)" }}>Scoring live as the call runs…</p>
             )
-          ) : judging ? (
-            <div>
-              <div className="flex items-center gap-2 text-sm" style={{ color: "var(--amber)" }}>
-                <Loader2 size={13} className="spin" />
-                Final scoring with Claude Sonnet…
-              </div>
-              {liveScores.length > 0 && (
-                <>
-                  <p className="text-xs mt-3 mb-3" style={{ color: "var(--ink-3)" }}>
-                    Live scores from the call (Haiku) — replaced by final scores shortly:
-                  </p>
-                  <div className="space-y-5">
-                    {liveScores.map((s) => (
-                      <ScoreBar key={s.field} field={s.field} score={s.score} passed={s.passed} reasoning={s.reasoning} />
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
           ) : scores.length === 0 ? (
             <p className="text-sm" style={{ color: "var(--ink-3)" }}>No judge scores available.</p>
           ) : (
