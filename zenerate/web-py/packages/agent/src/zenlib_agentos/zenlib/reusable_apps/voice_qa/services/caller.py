@@ -90,26 +90,50 @@ class RemoteAudioCaller(CallerInterface):
     Drives a scenario against a customer's *deployed* ElevenLabs Conversational
     AI agent over the caller service's WebSocket bridge.
 
-    Unlike AudioCaller there is no Daily room and no Pipecat agent pipeline — the
-    agent under test is hosted by ElevenLabs and reached by ``agent.el_agent_id``.
-    We therefore POST straight to the caller service ``/remote/run`` endpoint
-    (which mounts ``/recordings`` and owns the ElevenLabs API key) rather than
-    going through Pipecat's ``/connect``.
+    The caller service provisions a Daily.co room via /remote/connect so a human
+    observer can join the room URL and listen live during the call. Both caller TTS
+    audio and ElevenLabs agent audio are mirrored into the Daily room by the
+    ScenarioRemoteCallerDailyBot running inside the caller service.
     """
 
     def __init__(self, agent):
         self.agent = agent
-        # No live listen-in: there is no Daily room to observe for a remote agent.
         self.observer_url: str | None = None
         # Set if ElevenLabs closed the WS mid-call (e.g. agent technical issues).
         self.disconnect_reason: str = ""
         # Rubric for the during-call judge sub-agent; the runner sets this.
         self.rubric: dict = {}
+        self._room_url: str = ""
+        self._caller_token: str = ""
 
     def _connect(self):
-        # Nothing to provision — ElevenLabs already hosts the agent. Kept so the
-        # runner's audio branch can call it uniformly with AudioCaller.
-        return
+        """Provision a Daily room for live observation.
+
+        POST /remote/connect returns immediately with a room URL and an observer
+        join link. The runner persists observer_url to the TestRun so the "Listen
+        Live" button appears while the call is still in progress.
+
+        Falls back gracefully when the caller service has no DAILY_API_KEY — the
+        test still runs, just without live listen-in.
+        """
+        import httpx
+        from django.conf import settings
+        try:
+            r = httpx.post(
+                f"{settings.CALLER_SERVER_URL}/remote/connect",
+                headers={"X-Service-Token": settings.SERVICE_TOKEN},
+                timeout=15,
+            )
+            r.raise_for_status()
+            data = r.json()
+            self._room_url = data.get("room_url", "")
+            self._caller_token = data.get("caller_token", "")
+            self.observer_url = data.get("observer_url")
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Remote room provisioning failed (%s) — running without live listen-in", e
+            )
 
     def run_scenario(self, steps: list[dict], conversation_id: str, recording_id: str = "") -> list[dict]:
         import httpx
@@ -128,6 +152,9 @@ class RemoteAudioCaller(CallerInterface):
                 "dynamic_variables": self.agent.dynamic_variables or {},
                 "steps": steps,
                 "recording_id": recording_id,
+                # Daily room for live observer access (empty → falls back to WS-only bot)
+                "room_url": self._room_url,
+                "room_token": self._caller_token,
                 # During-call judge sub-agent inputs:
                 "run_id": recording_id,
                 "tenant_id": str(self.agent.tenant_id),
@@ -148,7 +175,8 @@ class RemoteAudioCaller(CallerInterface):
         raise NotImplementedError("RemoteAudioCaller does not support turn-by-turn send().")
 
     def reset(self):
-        return
+        self._room_url = ""
+        self._caller_token = ""
 
 
 def get_caller(mode: str, agent) -> CallerInterface:
