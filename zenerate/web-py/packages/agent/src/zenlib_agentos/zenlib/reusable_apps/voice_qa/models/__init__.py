@@ -49,10 +49,26 @@ class TenantAPIKey(UUIDTenantModel):
 
     @classmethod
     def authenticate(cls, raw_key: str):
-        """Return tenant for a valid raw key, or None."""
+        """Return tenant for a valid raw key, or None.
+
+        Must bypass Postgres RLS for the key-hash lookup: at authentication
+        time the tenant context is not yet established, so
+        app.current_tenant_id is 0 (or stale from a previous request) and
+        the multitenant_rls__current_tenant_only policy would filter out all
+        rows. The multitenant_rls__cross_tenant escape hatch is used here for
+        exactly this bootstrap case — we're looking up BY the key (unique),
+        not filtering by tenant.
+        """
+        from django.db import connection
         key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
         try:
-            return cls.objects.select_related("tenant").get(key_hash=key_hash).tenant
+            with connection.cursor() as cur:
+                cur.execute("SELECT set_config('app.cross_tenant_access', 'true', false)")
+            try:
+                return cls.objects.select_related("tenant").get(key_hash=key_hash).tenant
+            finally:
+                with connection.cursor() as cur:
+                    cur.execute("SELECT set_config('app.cross_tenant_access', 'false', false)")
         except cls.DoesNotExist:
             return None
 

@@ -359,3 +359,25 @@ def test_agent_chat_rejects_elevenlabs_agent(tenant_a, in_tenant, remote_agent):
         )
     assert resp.status_code == 400
     assert "ElevenLabs" in resp.data["error"]
+
+
+def test_api_key_auth_without_prior_tenant_context(tenant_a, in_tenant):
+    """TenantAPIKey.authenticate() must work even when context.current_tenant is None.
+
+    Previously, the key-hash lookup was blocked by Postgres RLS because
+    app.current_tenant_id hadn't been set yet at middleware time. This test
+    exercises the cold path — no in_tenant() wrapper around the API call —
+    so TenantAPIKeyMiddleware must use the cross_tenant_access bypass to
+    find the key, then establish the tenant context.
+    """
+    from zenlib_agentos.zenlib.reusable_apps.voice_qa.models import TenantAPIKey
+    from rest_framework.test import APIClient
+
+    with in_tenant(tenant_a):
+        _, raw = TenantAPIKey.generate(tenant_a)
+
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f"Api-Key {raw}")
+    # No in_tenant() here — context.current_tenant starts as None
+    resp = client.get("/api/v1/scenarios/")
+    assert resp.status_code == 200
