@@ -65,6 +65,39 @@ def test_live_scores_requires_service_token(run_obj):
     assert resp.status_code in (401, 403)
 
 
+def test_live_scores_merge_by_field(tenant_a, in_tenant, run_obj):
+    """Two POSTs for the same field must overwrite, not append."""
+    client = _svc_client(tenant_a)
+    first = {"turn": 1, "scores": [{"field": "safety", "score": 0.5, "passed": False, "reasoning": "meh"}]}
+    client.post(f"/internal/test-runs/{run_obj.id}/live-scores/", first, format="json")
+
+    second = {"turn": 2, "scores": [{"field": "safety", "score": 0.9, "passed": True, "reasoning": "ok"}]}
+    client.post(f"/internal/test-runs/{run_obj.id}/live-scores/", second, format="json")
+
+    with in_tenant(tenant_a):
+        run_obj.refresh_from_db()
+    scores = run_obj.live_scores["scores"]
+    safety_scores = [s for s in scores if s["field"] == "safety"]
+    assert len(safety_scores) == 1, "field should be merged, not appended"
+    assert safety_scores[0]["score"] == 0.9
+
+
+def test_live_scores_multiple_fields_merged(tenant_a, in_tenant, run_obj):
+    """First POST writes safety; second POST adds goal_completion — both survive."""
+    client = _svc_client(tenant_a)
+    client.post(f"/internal/test-runs/{run_obj.id}/live-scores/",
+                {"turn": 1, "scores": [{"field": "safety", "score": 0.8, "passed": True, "reasoning": "good"}]},
+                format="json")
+    client.post(f"/internal/test-runs/{run_obj.id}/live-scores/",
+                {"turn": 1, "scores": [{"field": "goal_completion", "score": 0.7, "passed": True, "reasoning": "ok"}]},
+                format="json")
+
+    with in_tenant(tenant_a):
+        run_obj.refresh_from_db()
+    fields = {s["field"] for s in run_obj.live_scores["scores"]}
+    assert fields == {"safety", "goal_completion"}
+
+
 # --------------------------------------------------------------------------- ScopedIdentityUserRateThrottle
 
 def _throttle():

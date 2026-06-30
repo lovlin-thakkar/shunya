@@ -1,6 +1,12 @@
+import logging
 from abc import ABC, abstractmethod
+
+import httpx
+
 from .chat import AgentChat
 from .quirks import strip_quirks, extract_quirk_tags
+
+logger = logging.getLogger(__name__)
 
 
 class CallerInterface(ABC):
@@ -27,14 +33,9 @@ class TextCaller(CallerInterface):
 
 
 class RemoteAudioCaller(CallerInterface):
-    """
-    Drives a scenario against a customer's *deployed* ElevenLabs Conversational
-    AI agent over the caller service's WebSocket bridge.
-
-    The caller service provisions a Daily.co room via /remote/connect so a human
-    observer can join the room URL and listen live during the call. Both caller TTS
-    audio and ElevenLabs agent audio are mirrored into the Daily room by the
-    ScenarioRemoteCallerDailyBot running inside the caller service.
+    """Drives a scenario against a customer's deployed ElevenLabs Conversational
+    AI agent. EvalAgent (caller service) connects over WebSocket; EvalBridge
+    optionally mirrors audio into a Daily.co room for live listen-in.
     """
 
     def __init__(self, agent):
@@ -50,14 +51,9 @@ class RemoteAudioCaller(CallerInterface):
     def _connect(self):
         """Provision a Daily room for live observation.
 
-        POST /remote/connect returns immediately with a room URL and an observer
-        join link. The runner persists observer_url to the TestRun so the "Listen
-        Live" button appears while the call is still in progress.
-
-        Falls back gracefully when the caller service has no DAILY_API_KEY — the
-        test still runs, just without live listen-in.
+        Falls back gracefully when DAILY_API_KEY is not set on the caller service
+        — the test still runs, just without a live listen-in link.
         """
-        import httpx
         from django.conf import settings
         try:
             r = httpx.post(
@@ -71,13 +67,9 @@ class RemoteAudioCaller(CallerInterface):
             self._caller_token = data.get("caller_token", "")
             self.observer_url = data.get("observer_url")
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning(
-                "Remote room provisioning failed (%s) — running without live listen-in", e
-            )
+            logger.warning("Remote room provisioning failed (%s) — running without live listen-in", e)
 
     def run_scenario(self, steps: list[dict], conversation_id: str, recording_id: str = "") -> list[dict]:
-        import httpx
         from django.conf import settings
         from ..models import ElevenLabsCredential
         # The tenant's own ElevenLabs key reaches their agent (and signs private

@@ -50,6 +50,10 @@ GREETING_SILENCE_GAP = 2.5
 
 LIVE_MODEL = "claude-sonnet-4-6"
 PASS_THRESHOLD = 0.7
+# Hard cap on each scoring call. The Anthropic SDK defaults to a 600s timeout
+# with retries; without an explicit bound a stalled scoring request blocks the
+# speak loop (score() is awaited inline) and wedges the whole run in "running".
+SCORE_TIMEOUT = 20.0
 
 # daily-python allows only ONE active CallClient per process (same restriction that
 # forced the caller bot into a separate process from the pipecat server).
@@ -71,7 +75,8 @@ class Scorer:
 
     def __init__(self, anthropic_api_key: str, persona: str = ""):
         self._client = (
-            AsyncAnthropic(api_key=anthropic_api_key) if anthropic_api_key else None
+            AsyncAnthropic(api_key=anthropic_api_key, timeout=SCORE_TIMEOUT, max_retries=0)
+            if anthropic_api_key else None
         )
         self._persona = persona or ""
 
@@ -589,8 +594,13 @@ class EvalAgent:
         snapshot = list(self._transcript)
 
         # Score each field independently so partial failures don't block others.
+        # Hard-cap each call with wait_for so a stalled Anthropic request can never
+        # freeze the speak loop (this runs inline between caller turns).
         results = await asyncio.gather(
-            *[self._scorer.score(snapshot, [field]) for field in self._fields],
+            *[
+                asyncio.wait_for(self._scorer.score(snapshot, [field]), timeout=SCORE_TIMEOUT)
+                for field in self._fields
+            ],
             return_exceptions=True,
         )
 

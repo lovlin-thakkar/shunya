@@ -29,6 +29,9 @@ DAILY_API_KEY = os.environ.get("DAILY_API_KEY", "")
 # Cap concurrent remote runs so parallel "Run All" dispatches don't overwhelm
 # ElevenLabs (its edge refuses connections under burst load → mute caller / 500s).
 # Excess requests get 429; the Celery task retries them with backoff.
+# WARNING: _active_remote is a per-process integer. asyncio is single-threaded so
+# no lock is needed, but if uvicorn is run with --workers > 1, each worker process
+# has its own counter and the cap silently multiplies. Always run with one worker.
 MAX_CONCURRENT_REMOTE = int(os.environ.get("MAX_CONCURRENT_REMOTE", "4"))
 _active_remote = 0
 

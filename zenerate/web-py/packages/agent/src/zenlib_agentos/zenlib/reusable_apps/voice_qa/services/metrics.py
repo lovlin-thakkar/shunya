@@ -1,35 +1,13 @@
-import ipaddress
 import logging
-import socket
-from urllib.parse import urlparse
 
 import httpx
 
 from django.utils import timezone
 
 from ..models import Call, Transcript, CallMetric, AlertConfig, AlertEvent
+from .ssrf import is_safe_webhook_url
 
 logger = logging.getLogger(__name__)
-
-
-def _is_safe_webhook_url(url: str) -> bool:
-    """Return False for URLs that resolve to private/internal addresses (SSRF guard)."""
-    try:
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            return False
-        hostname = parsed.hostname or ""
-        blocked = {"localhost", "metadata.google.internal", "169.254.169.254"}
-        if hostname.lower() in blocked:
-            return False
-        ip = ipaddress.ip_address(socket.gethostbyname(hostname))
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-            return False
-    except socket.gaierror:
-        pass  # Unresolvable host is not reachable, safe to allow
-    except Exception:
-        return False
-    return True
 
 
 def compute_metrics(call_id: str):
@@ -89,7 +67,7 @@ def _fire_alert(config, call, value):
         "triggered_at": timezone.now().isoformat(),
     }
     event = AlertEvent.objects.create(alert_config=config, call=call, metric_value=value, payload_sent=payload)
-    if config.webhook_url and _is_safe_webhook_url(config.webhook_url):
+    if config.webhook_url and is_safe_webhook_url(config.webhook_url):
         try:
             with httpx.Client(timeout=5) as client:
                 client.post(config.webhook_url, json=payload)

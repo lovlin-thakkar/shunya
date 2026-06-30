@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from ..models import TestRun, TestResult, JudgeScore
 from .caller import get_caller
+from .judge import score_transcript
 from zenlib.reusable_apps.multitenant import context
 
 logger = logging.getLogger(__name__)
@@ -26,10 +27,9 @@ def run_scenario(test_run_id: str):
     transcript_turns = []
 
     try:
-        # Both AudioCaller (Pipecat/Daily) and RemoteAudioCaller (ElevenLabs WS)
-        # expose run_scenario; turn-by-turn TextCaller does not. Keying off the
-        # capability lets remote ElevenLabs agents take the audio path even when
-        # the run's mode is "text".
+        # RemoteAudioCaller exposes run_scenario; turn-by-turn TextCaller does not.
+        # Keying off the capability lets ElevenLabs agents take the remote path
+        # regardless of the run's mode field.
         if hasattr(caller, "run_scenario"):
             # Give the during-call judge sub-agent the scenario's rubric.
             if hasattr(caller, "rubric"):
@@ -60,18 +60,15 @@ def run_scenario(test_run_id: str):
                 transcript_turns.append({"speaker": "agent", "text": result["response"], "ts_ms": result.get("ts_ms", 0), "quirks": []})
 
         assertion_results = _evaluate_assertions(run.scenario.assertions, transcript_turns, run.agent)
-        # Skip None (semantic assertions pending LLM evaluation) — treat as neutral.
-        # all() on an empty sequence returns True, correct when all assertions are semantic.
-        assertions_passed = all(
-            a["passed"] for a in assertion_results if a["passed"] is not None
-        )
+        assertions_passed = all(a["passed"] for a in assertion_results)
 
         test_result = TestResult.objects.create(
             test_run=run, passed=assertions_passed,
             transcript=transcript_turns, assertion_results=assertion_results,
         )
 
-        _promote_live_scores(run, test_result)
+        had_live_scores = _promote_live_scores(run, test_result)
+        _post_call_score(run, test_result, had_live_scores)
 
         run.status = TestRun.Status.COMPLETED
         run.completed_at = timezone.now()
@@ -86,7 +83,7 @@ def run_scenario(test_run_id: str):
         # Transient capacity/overload errors from pipecat — re-raise so the
         # Celery task can retry with backoff instead of permanently failing the run.
         if isinstance(e, httpx.HTTPStatusError) and e.response.status_code in (429, 502, 503):
-            logger.warning(f"TestRun {test_run_id} got transient {e.response.status_code} from pipecat — will retry")
+            logger.warning(f"TestRun {test_run_id} got transient {e.response.status_code} from caller service — will retry")
             try:
                 run.status = TestRun.Status.QUEUED
                 run.started_at = None
@@ -104,18 +101,17 @@ def run_scenario(test_run_id: str):
             pass  # run may have been deleted; nothing to do
 
 
-def _promote_live_scores(run: TestRun, test_result: TestResult):
-    """Promote the final live scores (Sonnet, written during the call) to
-    permanent JudgeScore rows on the TestResult.
+def _promote_live_scores(run: TestRun, test_result: TestResult) -> bool:
+    """Promote live scores (written by Scorer during the call) to permanent JudgeScore rows.
 
-    live_scores is refreshed from the DB to ensure we get the last batch
-    written by the eval agent after the final agent turn. If no scores exist
-    (text mode, or live scoring not wired up) this is a no-op.
+    Returns True if live scores were found and promoted, False if none existed
+    (text mode). The return value lets the caller skip post-call scoring when
+    live scores already cover the run.
     """
     run.refresh_from_db(fields=["live_scores"])
     raw_scores = (run.live_scores or {}).get("scores") or []
     if not raw_scores:
-        return
+        return False
 
     tenant = context.current_tenant.get()
     rubric = run.scenario.rubric or {}
@@ -151,6 +147,48 @@ def _promote_live_scores(run: TestRun, test_result: TestResult):
 
     logger.info(
         "Promoted %d live scores to JudgeScore rows for TestResult %s (weighted avg %.2f)",
+        len(judge_scores), test_result.id, weighted_avg,
+    )
+    return True
+
+
+def _post_call_score(run: TestRun, test_result: TestResult, had_live_scores: bool):
+    """Score the full transcript with Claude Sonnet after the call ends.
+
+    Skipped when live scores were already promoted (remote mode). Runs
+    synchronously inside run_scenario_task so scores are ready before the task
+    completes.
+    """
+    if had_live_scores:
+        return
+
+    rubric = run.scenario.rubric or {}
+    scores = score_transcript(test_result.transcript, rubric)
+    if not scores:
+        return
+
+    tenant = context.current_tenant.get()
+    judge_scores = [
+        JudgeScore(
+            test_result=test_result,
+            field=s["field"],
+            score=s["score"],
+            reasoning=s["reasoning"],
+            passed=s["passed"],
+            tenant=tenant,
+        )
+        for s in scores
+    ]
+    JudgeScore.objects.bulk_create(judge_scores, ignore_conflicts=True)
+
+    weights = [rubric.get(js.field, 1.0) for js in judge_scores]
+    total_weight = sum(weights) or 1.0
+    weighted_avg = sum(js.score * w for js, w in zip(judge_scores, weights)) / total_weight
+    test_result.passed = test_result.passed and weighted_avg >= 0.7
+    test_result.save(update_fields=["passed"])
+
+    logger.info(
+        "Post-call scored %d fields for TestResult %s (weighted avg %.2f)",
         len(judge_scores), test_result.id, weighted_avg,
     )
 
