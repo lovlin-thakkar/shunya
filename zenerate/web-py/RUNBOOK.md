@@ -41,7 +41,7 @@ Shunya is a simplified Cekura-style QA platform for voice AI agents. It tests ag
 ```bash
 cd /Users/lovlinthakkar/PycharmProjects/Shunya
 
-# Put keys in django_api/.env and pipecat_agent/.env (see §1 Configure environment)
+# Put keys in apps/api/.env and services/voice/.env (see §1 Configure environment)
 docker-compose build
 docker-compose up -d        # postgres, redis, django, celery_worker, pipecat, caller
 
@@ -429,7 +429,7 @@ with tu.schema_context('demo'):
 
 ## 12. Voice Agent & Audio-Fidelity Testing
 
-Requires ElevenLabs and Daily API keys in `pipecat_agent/.env` (or environment).
+Requires ElevenLabs and Daily API keys in `services/voice/.env` (or environment).
 ElevenLabs handles both TTS (caller speaking) and STT via Scribe v2 (transcribing agent) — no Deepgram needed.
 
 ```bash
@@ -441,7 +441,7 @@ export ANTHROPIC_API_KEY=...
 ### Start the Pipecat server
 
 ```bash
-cd pipecat_agent
+cd services/voice
 pip install -r requirements.txt
 uvicorn server:app --port 8001 --reload
 ```

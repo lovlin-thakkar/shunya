@@ -6,7 +6,9 @@ Architecture (WorkerRunner):
     ├── EvalBridge — raw daily.CallClient, joins room as "Shunya Eval"
     └── ScoringSubAgent × N (BaseWorker) — concurrent scoring via bus jobs
 
-Replaces remote_caller_daily_bot.py, remote_caller_bot.py, judge_subagent.py.
+Pipecat-worker-based reimplementation of the remote ElevenLabs agent caller.
+Replaces the earlier standalone WS+Daily relay bot approach with a proper
+WorkerRunner + BaseWorker architecture and concurrent scoring sub-agents.
 """
 import asyncio
 import base64
