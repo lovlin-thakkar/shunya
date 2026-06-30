@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { StatusBadge } from "./status-badge";
-import { CheckCircle2, XCircle, Loader2, ArrowRight, Mic, MessageSquare } from "lucide-react";
+import { CheckCircle2, XCircle, AlertTriangle, Loader2, ArrowRight, Mic, MessageSquare } from "lucide-react";
 import type { TestRun } from "@/lib/types";
 import { formatDistanceToNow } from "@/lib/time";
 
@@ -118,9 +118,13 @@ export function RunsTable({ runs, showAgent }: Props) {
 
                 <td className="py-3 pr-5">
                   {result ? (
-                    result.passed
-                      ? <CheckCircle2 size={15} style={{ color: "var(--green)" }} />
-                      : <XCircle size={15} style={{ color: "var(--red)" }} />
+                    result.verdict === "success" ? (
+                      <CheckCircle2 size={15} style={{ color: "var(--green)" }} />
+                    ) : result.verdict === "partial" ? (
+                      <AlertTriangle size={15} style={{ color: "#b45309" }} />
+                    ) : (
+                      <XCircle size={15} style={{ color: "var(--red)" }} />
+                    )
                   ) : (
                     <span style={{ color: "var(--ink-3)" }}>—</span>
                   )}

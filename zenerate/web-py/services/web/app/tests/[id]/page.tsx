@@ -2,7 +2,7 @@
 
 import useSWR from "swr";
 import { swrFetcher } from "@/lib/api";
-import { Loader2, ChevronLeft, CheckCircle2, XCircle, ExternalLink, Mic, MessageSquare, Clock, AlertTriangle, AlertCircle } from "lucide-react";
+import { Loader2, ChevronLeft, CheckCircle2, XCircle, ExternalLink, Mic, MessageSquare, Clock, AlertTriangle, AlertCircle, Download } from "lucide-react";
 import Link from "next/link";
 import { StatusBadge } from "@/components/status-badge";
 import { ScoreBar } from "@/components/score-bar";
@@ -89,11 +89,14 @@ export default function TestRunPage({ params }: Props) {
 
             {result && (
               <span
-                className="inline-flex items-center gap-1 text-xs font-semibold"
-                style={{ color: result.passed ? "var(--green)" : "var(--red)" }}
+                className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded"
+                style={{
+                  color: result.verdict === "success" ? "var(--green)" : result.verdict === "partial" ? "#b45309" : "var(--red)",
+                  background: result.verdict === "success" ? "rgba(34,197,94,0.08)" : result.verdict === "partial" ? "rgba(245,158,11,0.08)" : "rgba(220,38,38,0.08)",
+                }}
               >
-                {result.passed ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
-                {result.passed ? "Passed" : "Failed"}
+                {result.verdict === "success" ? <CheckCircle2 size={13} /> : result.verdict === "partial" ? <AlertTriangle size={13} /> : <XCircle size={13} />}
+                {result.verdict === "success" ? "Success" : result.verdict === "partial" ? "Partial" : "Failed"}
               </span>
             )}
           </div>
@@ -285,12 +288,21 @@ export default function TestRunPage({ params }: Props) {
                 style={{ borderTop: "1px solid var(--border)" }}
               >
                 <span className="text-xs font-medium" style={{ color: "var(--ink-3)" }}>Overall</span>
-                <span
-                  className="text-sm font-semibold"
-                  style={{ color: result?.passed ? "var(--green)" : "var(--red)" }}
-                >
-                  {scores.filter((s) => s.passed).length}/{scores.length} passed
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm" style={{ color: "var(--ink-2)" }}>
+                    {scores.filter((s) => s.passed).length}/{scores.length} passed
+                  </span>
+                  <span
+                    className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded"
+                    style={{
+                      color: result?.verdict === "success" ? "var(--green)" : result?.verdict === "partial" ? "#b45309" : "var(--red)",
+                      background: result?.verdict === "success" ? "rgba(34,197,94,0.08)" : result?.verdict === "partial" ? "rgba(245,158,11,0.08)" : "rgba(220,38,38,0.08)",
+                    }}
+                  >
+                    {result?.verdict === "success" ? <CheckCircle2 size={11} /> : result?.verdict === "partial" ? <AlertTriangle size={11} /> : <XCircle size={11} />}
+                    {result?.verdict === "success" ? "Success" : result?.verdict === "partial" ? "Partial" : "Failed"}
+                  </span>
+                </div>
               </div>
             </div>
           )}

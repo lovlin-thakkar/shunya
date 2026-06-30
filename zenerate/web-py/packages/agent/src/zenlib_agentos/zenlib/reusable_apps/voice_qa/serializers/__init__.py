@@ -114,11 +114,32 @@ class JudgeScoreSerializer(serializers.ModelSerializer):
 
 class TestResultSerializer(serializers.ModelSerializer):
     scores = JudgeScoreSerializer(many=True, read_only=True)
+    verdict = serializers.SerializerMethodField()
 
     class Meta:
         model = TestResult
-        fields = ["id", "passed", "transcript", "assertion_results", "scores", "created_at"]
+        fields = ["id", "passed", "verdict", "transcript", "assertion_results", "scores", "created_at"]
         read_only_fields = ["id", "created_at"]
+
+    def get_verdict(self, obj):
+        RUBRIC_FIELDS = JudgeScore.RUBRIC_FIELDS
+        scores = list(obj.scores.all()) if obj.pk else []
+        if not scores:
+            return "failed" if not obj.passed else "success"
+
+        rubric = {}
+        if obj.test_run and obj.test_run.scenario:
+            rubric = obj.test_run.scenario.rubric or {}
+        active_rubric = {k: v for k, v in rubric.items() if k in RUBRIC_FIELDS} or {f: 1.0 for f in RUBRIC_FIELDS}
+
+        total_weight = sum(active_rubric.get(s.field, 1.0) for s in scores)
+        weighted_score = sum(s.score * active_rubric.get(s.field, 1.0) for s in scores) / total_weight if total_weight else 0.0
+
+        if weighted_score >= 0.7 and obj.passed:
+            return "success"
+        if weighted_score >= 0.7:
+            return "partial"
+        return "failed"
 
 
 class TestRunSerializer(serializers.ModelSerializer):

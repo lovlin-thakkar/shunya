@@ -27,6 +27,17 @@ export function Transcript({ turns, audioRunId, apiUrl }: Props) {
             style={{ accentColor: "var(--blue)" }}
             src={`${apiUrl ?? "http://localhost:8000"}/recordings/${audioRunId}.wav`}
           />
+          <p className="text-xs mt-2" style={{ color: "var(--ink-3)" }}>
+            <a
+              href={`${apiUrl ?? "http://localhost:8000"}/recordings/${audioRunId}.wav`}
+              download
+              className="underline underline-offset-2"
+              style={{ color: "var(--blue)" }}
+            >
+              {audioRunId}.wav
+            </a>
+            {" "}— saved to <code className="font-mono" style={{ fontSize: "10px" }}>/recordings/{audioRunId}.wav</code>
+          </p>
         </div>
       )}
 

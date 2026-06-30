@@ -62,6 +62,7 @@ export interface AssertionResult {
 export interface TestResult {
   id: string;
   passed: boolean;
+  verdict: "success" | "partial" | "failed";
   transcript: TranscriptTurn[];
   assertion_results: AssertionResult[];
   scores: JudgeScore[];

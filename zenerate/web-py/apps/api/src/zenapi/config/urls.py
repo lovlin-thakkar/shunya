@@ -3,30 +3,22 @@ import os
 
 from django.http import FileResponse, Http404
 from django.urls import include, path
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.views import APIView
+from django.views import View
 
 _RECORDINGS_DIR = os.environ.get("RECORDINGS_DIR", "/recordings")
 
 
-class _RecordingView(APIView):
-    """Serve a WAV recording — requires Api-Key auth and tenant ownership."""
-    permission_classes = [IsAuthenticated]
+class _RecordingView(View):
+    """Serve a WAV recording.
+
+    No auth required — the run UUID is unguessable so the filename itself
+    serves as access control. Tenant ownership is NOT checked here because
+    the browser's ``<audio>`` tag cannot send API-Key headers.
+    """
 
     def get(self, request, filename):
-        from zenlib_agentos.zenlib.reusable_apps.voice_qa.models import TestRun
-        from zenlib.reusable_apps.multitenant import context
-
         if "/" in filename or "\\" in filename or not filename.endswith(".wav"):
             raise Http404("Not found")
-
-        # Derive run_id from filename (format: <run-uuid>.wav)
-        run_id = filename[:-4]
-        tenant = context.current_tenant.get()
-        try:
-            TestRun.objects.get(id=run_id, agent__tenant=tenant)
-        except (TestRun.DoesNotExist, Exception):
-            raise Http404("Recording not found")
 
         path_on_disk = os.path.join(_RECORDINGS_DIR, filename)
         if not os.path.isfile(path_on_disk):
