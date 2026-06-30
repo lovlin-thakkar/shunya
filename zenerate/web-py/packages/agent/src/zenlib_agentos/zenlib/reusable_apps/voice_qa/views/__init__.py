@@ -1,6 +1,5 @@
 import httpx
 from celery import group as celery_group
-from django.conf import settings
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -130,27 +129,6 @@ class AgentViewSet(viewsets.ModelViewSet):
         agent = self.get_object()
         metrics = CallMetric.objects.filter(call__agent=agent).select_related("call")
         return Response(CallMetricSerializer(metrics, many=True).data)
-
-    @action(detail=True, methods=["post"], url_path="connect")
-    def connect(self, request, pk=None):
-        agent = self.get_object()
-        try:
-            r = httpx.post(
-                f"{settings.PIPECAT_SERVER_URL}/connect",
-                headers={"X-Service-Token": settings.SERVICE_TOKEN},
-                json={
-                    "agent_id": str(agent.id),
-                    "system_prompt": agent.system_prompt,
-                    "voice_id": agent.voice_id,
-                    "greeting": agent.greeting,
-                    "tenant_id": str(agent.tenant_id),
-                },
-                timeout=10,
-            )
-            r.raise_for_status()
-            return Response(r.json())
-        except httpx.HTTPError as e:
-            return Response({"error": f"Voice server unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
     @action(detail=True, methods=["get", "post"], url_path="alerts")
     def alerts(self, request, pk=None):

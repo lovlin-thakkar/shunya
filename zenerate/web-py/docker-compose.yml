@@ -46,7 +46,6 @@ services:
       DB_PASSWORD: zen
       DB_NAME: zenapi
       REDIS_URL: redis://redis:6379/0
-      PIPECAT_SERVER_URL: http://pipecat:8001
       CALLER_SERVER_URL: http://caller:8002
     depends_on:
       db:
@@ -72,31 +71,12 @@ services:
       DB_PASSWORD: zen
       DB_NAME: zenapi
       REDIS_URL: redis://redis:6379/0
-      PIPECAT_SERVER_URL: http://pipecat:8001
       CALLER_SERVER_URL: http://caller:8002
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
-
-  pipecat:
-    build:
-      context: ./services/voice
-      dockerfile: Dockerfile
-    command: uvicorn server:app --host 0.0.0.0 --port 8001 --reload
-    volumes:
-      - ./services/voice:/app
-    ports:
-      - "8001:8001"
-    env_file:
-      - ./services/voice/.env
-    environment:
-      DJANGO_API_URL: http://django:8000
-      CALLER_SERVICE_URL: http://caller:8002
-    depends_on:
-      - django
-      - caller
 
   caller:
     build:
@@ -111,8 +91,6 @@ services:
     env_file:
       - ./services/voice/.env
     environment:
-      # The judge sub-agent posts live scores to Django — must use the service
-      # hostname, not the .env's localhost (which is the caller container itself).
       DJANGO_API_URL: http://django:8000
 
   web:

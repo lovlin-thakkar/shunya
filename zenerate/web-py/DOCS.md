@@ -1,9 +1,8 @@
 # Shunya — Architecture & Developer Guide
 
-Shunya is a **voice-AI QA platform**. You point it at a conversational agent (the "agent
-under test"), hand it a scenario, and it drives a full conversation — over text *or* real
-WebRTC audio *or* deployed ElevenLabs Conversational AI agents — then has an LLM judge
-score the transcript against a rubric.
+Shunya is a **voice-AI QA platform**. You point it at an ElevenLabs Conversational AI agent,
+hand it a scenario, and it drives a full conversation — over text (in-process) or real
+ElevenLabs ConvAI audio — then scores the transcript live via Claude Sonnet.
 
 This document explains how the pieces fit together, how data flows through a test run, and
 where to find things in the codebase. For operational steps see `RUNBOOK.md`; for the deep
@@ -13,12 +12,12 @@ audio-mode engineering notes see `TECH_SPEC.md`.
 
 ## 1. The Big Picture
 
-There are **four** moving parts: one control plane, two voice processes, a CLI, and a web UI.
+There are **three** moving parts: one control plane, one voice/caller process, a CLI, and a web UI.
 
 ```
                                   ┌─────────────────────────────────────────────┐
                                   │                  YOU / CLIENT                 │
-                                  │   shunya CLI  ·  curl  ·  Next.js UI         │
+                                  │   shunya CLI  ·  curl  ·  Next.js UI (:3000) │
                                   └───────────────────────┬─────────────────────-┘
                                                            │  HTTPS + Api-Key
                                                            ▼
@@ -27,59 +26,46 @@ There are **four** moving parts: one control plane, two voice processes, a CLI, 
  │                                                                                          │
  │   voice_qa          ─ Agent, Scenario, TestRun, TestResult, JudgeScore, Call, ...         │
  │   multitenant       ─ Tenant, TenantAPIKey, ActivityTenantBaseModel, middlewares          │
- │   email_pipeline    ─ LogicalThread, Message, ... (sidecar app)                           │
  │                                                                                          │
- │        ┌──────────────┐         enqueue          ┌─────────────────────────────┐         │
- │        │  DRF views    │ ──────────────────────▶ │  Redis (broker + result)    │        │
- │        └──────────────┘                          └──────────────┬──────────────┘         │
- │                                                                 │ consume                 │
- │        ┌──────────────────────────────────────────────────────▼──────────────┐          │
- │        │  CELERY WORKER   run_scenario_task  ·  run_judge_task                 │          │
- │        │                  compute_call_metrics  ·  alert rollups               │          │
- │        └───────┬──────────────────────────────────────────────┬──────────────-┘          │
- └────────────────┼──────────────────────────────────────────────┼─────────────────────────┘
-                  │                                               │
-       TEXT MODE  │ in-process                    AUDIO / REMOTE  │ HTTP
-                  ▼                               MODES           ▼
-       ┌────────────────────┐        ┌──────────────────────────────────────────────┐
-       │ AgentChat (Haiku)  │        │  PIPECAT AGENT SERVER  (:8001 · FastAPI)       │
-       │ services/chat.py   │        │  server.py → pipeline.py                       │
-       │ stateful per        │        │  the AGENT UNDER TEST pipeline (BUILTIN):      │
-       │ conversation_id     │        │   Scribe v2 STT → Claude Haiku → 11Labs TTS    │
-       └────────────────────┘        └───────────────────┬──────────────────────────┘
-                                                         │ POST /run (separate proc)
-                                                         ▼
-                                     ┌──────────────────────────────────────────────┐
-                                     │  CALLER SERVICE  (:8002 · FastAPI)             │
-                                     │  caller_server.py → caller_bot.py              │
-                                     │  ScenarioCallerBot (BUILTIN audio mode):        │
-                                     │   11Labs TTS out (virtual mic)                 │
-                                     │   Scribe v2 on agent audio (virtual speaker)   │
-                                     │   writes /recordings/<run-id>.wav              │
-                                     │                                                │
-                                     │  EvalAgent (ELEVENLABS remote mode):            │
-                                     │   Plain async class (no Pipecat infra)         │
-                                     │   Connect to ElevenLabs ConvAI WebSocket       │
-                                     │   Drive scenario steps, concurrent scoring     │
-                                     │   Post live scores to Django                   │
-                                     └───────┬──────────────────────────┬────────────┘
-                                             │                          │
-                        ┌────────────────────▼─────────┐   ┌───────────▼───────────┐
-                        │   DAILY.CO WebRTC room         │   │ ElevenLabs ConvAI WS  │
-                        │   (bot ↔ bot, audio mode)      │   │ (remote agent mode)   │
-                        └────────────────────────────────┘   └───────────────────────┘
+ │        ┌──────────────┐  read/write   ┌──────────────────────────┐                      │
+ │        │  DRF views    │ ────────────▶ │  Postgres  (:5432)        │                     │
+ │        └──────┬───────┘               │  RLS single-schema        │                     │
+ │               │ enqueue               └──────────────────────────┘                      │
+ │               ▼                                                                          │
+ │        ┌─────────────────────────────┐  read/write  ┌──────────────────────────┐        │
+ │        │  Redis  (:6379)              │ ◀─────────── │  CELERY WORKER            │        │
+ │        │  Celery broker + result      │ ──────────▶  │  run_scenario_task        │        │
+ │        └─────────────────────────────┘  task queue  │  compute_call_metrics     │        │
+ │                                                      └───────┬──────────────────┘        │
+ └──────────────────────────────────────────────────────────────┼────────────────────────────┘
+                                                                │
+                  ┌─────────────────────────────────────────────┤
+                  │ TEXT MODE (in-process)                       │ REMOTE MODE (HTTP to :8002)
+                  ▼                                              ▼
+       ┌────────────────────┐        ┌──────────────────────────────────────────────────────┐
+       │ AgentChat          │        │  CALLER SERVICE  (:8002 · FastAPI + daily-python)      │
+       │ Claude Haiku       │        │                                                         │
+       │ stateful per        │        │  EvalAgent  (plain async class, no Pipecat)            │
+       │ conversation_id     │        │  ├─ WebSocket → ElevenLabs ConvAI (agent under test)   │
+       └────────────────────┘        │  ├─ EL TTS → PCM audio frames (the synthetic caller)   │
+                                     │  ├─ EvalBridge → Daily.co room (live listen-in)         │
+                                     │  ├─ Scorer → Claude Sonnet (rubric scoring per turn)    │
+                                     │  ├─ POST /internal/…/live-scores/ → Django after turn   │
+                                     │  └─ write_mixed_wav → /recordings/<run-id>.wav          │
+                                     └───────────┬───────────────────┬────────────────────────┘
+                                                 │                   │
+                                  ┌──────────────▼──────┐  ┌────────▼────────────────────┐
+                                  │ ElevenLabs ConvAI WS │  │  Daily.co WebRTC room        │
+                                  │ (the agent under     │  │  EvalBridge joins as listener│
+                                  │  test, remote)       │  │  observer_url → TestRun      │
+                                  └─────────────────────-┘  └─────────────────────────────┘
 ```
 
-**Why two voice processes?** `daily-python` allows only one `CallClient` / `Daily.init()`
-per OS process. The agent and the synthetic caller each need their own, so they live in
-separate FastAPI services (`:8001` agent, `:8002` caller).
-
-**Three test modes:**
+**Two test modes:**
 
 | Mode | Target | CallerInterface | Voice Runtime |
 |------|--------|----------------|---------------|
 | `text` | BUILTIN (in-process Haiku) | `TextCaller` | None — in-process |
-| `audio` | BUILTIN (Pipecat pipeline) | `AudioCaller` | Pipecat :8001 + Caller :8002 |
 | `remote` | ELEVENLABS (ConvAI agent) | `RemoteAudioCaller` | Caller :8002 — EvalAgent |
 
 ---
@@ -89,15 +75,13 @@ separate FastAPI services (`:8001` agent, `:8002` caller).
 | Service          | Process / Port      | Entry point                       | Role                                                            |
 |------------------|---------------------|-----------------------------------|----------------------------------------------------------------|
 | **Django API**   | `:8000`             | `apps/api/src/zenapi/config/`     | Multi-tenant REST control plane (RLS); serves `/recordings/*.wav` |
-| **Celery worker**| —                   | `packages/agent/.../voice_qa/tasks/` | Runs scenarios + LLM judge + metric/alert computation; NOT auto-reloaded |
-| **Pipecat agent**| `:8001`             | `services/voice/server.py`        | The voice **agent under test** pipeline                         |
-| **Caller bot**   | `:8002`             | `services/voice/caller_server.py` | The synthetic **caller** (`ScenarioCallerBot` + `EvalAgent`)   |
+| **Celery worker**| —                   | `packages/agent/.../voice_qa/tasks/` | Runs scenarios + metric/alert computation; NOT auto-reloaded |
+| **Caller bot**   | `:8002`             | `services/voice/caller_server.py` | EvalAgent (remote mode): ConvAI WS + Scorer + EvalBridge + WAV |
 | **Web UI**       | `:3000`             | `services/web/`                   | Next.js frontend for agents, scenarios, test runs               |
 | **CLI**          | local               | `cli/main.py`                     | Thin wrapper over the REST API (`shunya …`)                     |
 | Postgres / Redis | `:5432` / `:6379`   | docker-compose                    | Single-schema RLS DB; Celery broker + result backend           |
 
-`docker-compose up` brings the whole stack up. The voice services are pinned to
-`python:3.12` on `linux/amd64` (daily-python has no 3.14 wheels and misbehaves on ARM64).
+`docker-compose up` brings the whole stack up.
 
 ---
 
@@ -107,7 +91,7 @@ This is the spine of the system. Follow it once and the codebase makes sense.
 
 ```
 1.  POST /api/v1/test-runs/  {agent_id, scenario_id, mode}
-        └─▶ voice_qa/views/__init__.py  creates TestRun (status=running)
+        └─▶ voice_qa/views/__init__.py  creates TestRun (status=queued)
             └─▶ dispatches run_scenario_task(test_run_id, tenant_id)
                                                           ▲
                                   tenant_id is REQUIRED — the worker must set
@@ -124,18 +108,6 @@ This is the spine of the system. Follow it once and the codebase makes sense.
           • extract_quirk_tags() records them in the transcript
           • AgentChat.send()  →  Claude Haiku, in-process, stateful per conversation_id
         returns {response, ts_ms} for each step
-
-    ── AUDIO MODE (BUILTIN agent) ─────────────────────────────────────────
-        AudioCaller._connect() then .run_scenario(recording_id=run.id)
-          • POST :8001 /connect      → pipecat provisions the Daily room + starts the AGENT
-                                       pipeline; returns observer_url (pre-authed Daily join
-                                       link, room max_participants: 10) → persisted to
-                                       TestRun.observer_url so a human can listen in live
-          • POST :8001 /caller/run   → waits for agent TTS readiness, then
-              → POST :8002 /run      → ScenarioCallerBot joins the same Daily room
-          • caller speaks each step via 11Labs TTS (virtual mic);
-            captures agent audio via virtual speaker + Scribe v2 STT
-          • writes /recordings/<run-id>.wav  (mono 16 kHz, both sides mixed)
 
     ── REMOTE MODE (ELEVENLABS agent) ────────────────────────────────────
         RemoteAudioCaller.run_scenario(steps, conversation_id, ...)
@@ -157,86 +129,45 @@ This is the spine of the system. Follow it once and the codebase makes sense.
 
 4.  runner creates TestResult (the full transcript)
         └─▶ _promote_live_scores()  (runner.py)
-            • For remote mode only: reads final TestRun.live_scores from DB
+            • For remote mode: reads final TestRun.live_scores from DB
               (refreshed to capture the last EvalAgent batch), writes JudgeScore rows,
-              computes weighted average → updates TestResult.passed
-            • Text / audio mode: live_scores is empty, this is a no-op
+              computes weighted average, if > 0.7 → updates TestResult.passed.
+            • Text mode: live_scores is empty, this is a no-op
 
-6.  Client polls GET /api/v1/test-runs/<id>/  (or `shunya tests run … --wait`)
-        └─▶ reads back TestResult + JudgeScores + assertion_results + live_scores
-        └─▶ audio runs: GET /recordings/<run-id>.wav   (shunya tests audio <run-id>)
+5.  Client polls GET /api/v1/test-runs/<id>/  (or `shunya tests run … --wait`)
+        └─▶ reads back TestResult + JudgeScores + assertion_results
+        └─▶ remote runs: GET /recordings/<run-id>.wav   (shunya tests audio <run-id>)
         └─▶ live listen-in: once status=running, --wait prints TestRun.observer_url
             (per-run ephemeral Daily room — open it to hear the call in real time)
 ```
 
-### Internal endpoints (Pipecat → Django only)
+### Internal endpoints (EvalAgent → Django only)
 
-The voice pipeline reports turns back to Django over `/internal/` routes (service-to-service,
+The caller service reports scores back to Django over `/internal/` routes (service-to-service,
 authenticated by `X-Service-Token` + `X-Tenant-Id`):
 
 ```
-POST /internal/calls/start/              ← pipeline.py: a call began
-POST /internal/calls/{id}/turn/          ← each STT/LLM/TTS turn appended to Transcript
+POST /internal/calls/start/              ← call began
+POST /internal/calls/{id}/turn/          ← each turn appended to Transcript
 POST /internal/calls/{id}/end/           ← call finished; finalize Call + compute metrics (Celery)
-POST /internal/test-runs/{id}/live-scores/  ← EvalAgent posts live scores during remote runs
+POST /internal/test-runs/{id}/live-scores/  ← EvalAgent posts live scores after each agent turn
 ```
 
 Handlers live in `packages/agent/src/zenlib_agentos/zenlib/reusable_apps/voice_qa/urls/internal.py` (routed from `apps/api/src/zenapi/config/urls.py`).
 
 ---
 
-## 3b. Joining a Daily Call Manually (two paths)
+## 3b. Live Listen-In (remote mode)
 
-There are two ways a human can get into the live Daily.co room. They are different — one is
-passive, one is interactive.
+During a **remote-mode test run**, `EvalBridge` joins the provisioned Daily.co room and relays
+audio. The room URL is persisted to `TestRun.observer_url`; `shunya tests run … --wait`
+prints it once the run reaches `running`. Open it to **hear** the EvalAgent ↔ ElevenLabs
+agent conversation live.
 
-```
-                          ┌─────────────────────────────────────────────────────────┐
-                          │            Daily.co WebRTC room (max 10 seats)            │
-                          └─────────────────────────────────────────────────────────┘
-        PATH A — LISTEN IN                          PATH B — TALK TO THE AGENT
-        (passive, during a test run)                (interactive, ad-hoc)
-   ┌──────────────────────────────┐          ┌──────────────────────────────────────┐
-   │ agent bot  ◀──▶  caller bot   │          │ agent bot  ◀──▶  YOU (mic)             │
-   │            you = silent ear   │          │            no synthetic caller         │
-   └──────────────────────────────┘          └──────────────────────────────────────┘
-```
-
-### Path A — Listen in on a running test (passive)
-
-During an **audio-mode test run**, `/connect` mints an `observer_url` (a pre-authed Daily
-join link). The runner persists it to `TestRun.observer_url`, and
-`shunya tests run … --wait` prints it once the run reaches `running`. Open it
-to **hear** the synthetic caller ↔ agent conversation as it happens.
-
-### Path B — Talk to the agent yourself (interactive manual test)
-
-A dedicated endpoint starts **only the agent pipeline — no synthetic caller** — and returns a
-join link:
-
-```
-POST /api/v1/agents/<agent-id>/connect/        (voice_qa/views/ → pipecat /connect)
-  → provisions a Daily room, boots Scribe v2 → Haiku → 11Labs TTS (the agent)
-  → returns { room_url, caller_token, observer_url }
-```
-
-CLI wrapper:
-
-```bash
-shunya agents connect <agent-id>            # opens the join link in your browser
-shunya agents connect <agent-id> --no-open  # just print the link
-```
-
-Requires the **pipecat** voice server (`:8001`) to be up. The **caller** service (`:8002`) is
-NOT needed here — there's no synthetic caller in this path.
-
-| | Path A — Listen in | Path B — Talk to it |
-|---|---|---|
-| Trigger        | audio-mode test run                | `shunya agents connect <id>`         |
-| Synthetic caller | yes (drives the convo)           | no — you drive it                    |
-| Your role      | silent observer                    | the caller (mic on)                  |
-| Services needed | pipecat :8001 + caller :8002      | pipecat :8001 only                   |
-| Scored / saved | yes (TestResult, JudgeScore, .wav) | no (ad-hoc, not recorded)            |
+Only **one** EvalBridge can be active per caller process at a time (one `CallClient` per
+process — Daily SDK constraint). If two remote runs start concurrently, the second runs
+WS-only (no live listen-in for that run). The enforcing flag is `_daily_bridge_in_use`
+in `eval_agent.py`.
 
 ---
 
@@ -267,7 +198,7 @@ all tables, all tenants → isolated by Postgres RLS on tenant_id
 |--------|--------|---------------|---------|
 | Knox token | `Authorization: Token <token> <tenant_id>` | `TokenAuthentication` | Web UI |
 | API key | `Authorization: Api-Key <raw_key>` | `TenantAPIKeyAuthentication` | CLI, curl |
-| Service token | `X-Service-Token` + `X-Tenant-Id` | `ServiceTokenAuthentication` | Pipecat → Django internal |
+| Service token | `X-Service-Token` + `X-Tenant-Id` | `ServiceTokenAuthentication` | Caller → Django internal |
 
 ---
 
@@ -275,7 +206,7 @@ all tables, all tenants → isolated by Postgres RLS on tenant_id
 
 ```
 zenerate/web-py/
-├── docker-compose.yml          # the whole stack: postgres, redis, django, celery_worker, pipecat, caller, web
+├── docker-compose.yml          # the whole stack: postgres, redis, django, celery_worker, caller, web
 ├── CLAUDE.md                   # agent/contributor instructions (authoritative quick reference)
 ├── PRD.md / PLAN.md            # product requirements + build plan
 ├── TECH_SPEC.md                # deep audio-mode engineering notes + data models
@@ -323,25 +254,21 @@ zenerate/web-py/
 │           │   ├── urls/               # agents, scenarios, test_runs, monitoring, internal
 │           │   ├── services/
 │           │   │   ├── runner.py       # run_scenario() orchestrator; _check_assertion()
-│           │   │   ├── caller.py       # TextCaller, AudioCaller, RemoteAudioCaller; quirks DSL
-│           │   │   ├── judge.py        # Claude Sonnet rubric scoring
-│           │   │   ├── chat.py         # AgentChat — Claude Haiku, in-process
+│           │   │   ├── caller.py       # TextCaller, RemoteAudioCaller; Voice Quirks DSL
+│           │   │   ├── chat.py         # AgentChat — Claude Haiku, in-process (text mode)
 │           │   │   ├── quirks.py       # Voice Quirks DSL parsing
 │           │   │   └── metrics.py      # post-call metrics + alert evaluation
-│           │   ├── tasks/__init__.py   # Celery: run_scenario_task, run_judge_task, compute_call_metrics
+│           │   ├── tasks/__init__.py   # Celery: run_scenario_task, compute_call_metrics
 │           │   ├── authentication.py   # TenantAPIKeyAuthentication, ServiceTokenAuthentication
 │           │   ├── middleware.py       # TenantAPIKeyMiddleware
 │           │   └── management/commands/  # load_scenarios
 │           │
 │           └── email_pipeline/         # sidecar app (LogicalThread, Message, etc.)
 │
-├── services/voice/              # ── VOICE RUNTIME (Python 3.12 / linux-amd64) ───────
-│   ├── server.py                # :8001 AGENT — /connect, /caller/run, /health
-│   ├── pipeline.py              # run_voice_agent(): Scribe v2 STT → Haiku → 11Labs TTS
-│   ├── caller_server.py         # :8002 CALLER — /run, /remote/connect, /remote/run, /health
-│   ├── caller_bot.py            # ScenarioCallerBot; mixes both sides → mono 16kHz WAV
-│   ├── eval_agent.py            # EvalAgent (BaseWorker), EvalBridge, ScoringSubAgent
-│   ├── audio_utils.py           # TTS + WAV recording utilities
+├── services/voice/              # ── CALLER SERVICE (Python 3.12 / linux-amd64) ────────
+│   ├── caller_server.py         # :8002 CALLER — /remote/connect, /remote/run, /health
+│   ├── eval_agent.py            # EvalAgent (plain async), EvalBridge, Scorer
+│   ├── audio_utils.py           # TTS synthesis + WAV recording utilities
 │   ├── config.py                # voice IDs, model names, defaults
 │   ├── Dockerfile
 │   └── requirements.txt
@@ -361,7 +288,7 @@ zenerate/web-py/
 ├── scenarios/                  # scenario YAML (load_scenarios syncs → DB)
 │   └── *.yaml                  # angry_customer_refund, booking_happy_path, …
 │
-└── recordings/                 # generated <run-id>.wav files (audio-mode output)
+└── recordings/                 # generated <run-id>.wav files (remote-mode output)
 ```
 
 ### Quick "where do I…?" index
@@ -370,12 +297,9 @@ zenerate/web-py/
 |----------------------------------------------|-----------------------------------------------------------------|
 | Change how a scenario is driven / orchestrated | `packages/agent/.../voice_qa/services/runner.py`               |
 | Add/modify a Voice Quirks DSL tag            | `packages/agent/.../voice_qa/services/caller.py` (quirks) + `quirks.py` |
-| Tune the rubric scoring or pass threshold    | `packages/agent/.../voice_qa/services/judge.py`                |
+| Tune the rubric scoring or pass threshold    | `services/voice/eval_agent.py` (`Scorer`)                      |
 | Change the agent's brain (text mode)         | `packages/agent/.../voice_qa/services/chat.py` (`AgentChat`)   |
-| Change the voice pipeline (STT/LLM/TTS)      | `services/voice/pipeline.py`                                     |
-| Change the synthetic caller's behavior       | `services/voice/caller_bot.py` (`ScenarioCallerBot`)            |
-| Change remote EL agent eval behavior         | `services/voice/eval_agent.py` (`EvalAgent`, `ScoringSubAgent`) |
-| Talk to an agent live in a browser           | `shunya agents connect <id>` → `POST /api/v1/agents/<id>/connect/` |
+| Change remote EL agent eval behavior         | `services/voice/eval_agent.py` (`EvalAgent`, `Scorer`)         |
 | Add a REST endpoint                          | relevant `voice_qa/views/__init__.py` + `voice_qa/urls/`       |
 | Add a Celery task                            | `voice_qa/tasks/__init__.py` (remember the `tenant_id` arg!)   |
 | Add a model / migrate                        | `voice_qa/models/__init__.py` → `uv run python manage.py makemigrations && migrate` |
@@ -389,16 +313,15 @@ zenerate/web-py/
 
 | Term                  | Meaning                                                                          |
 |-----------------------|----------------------------------------------------------------------------------|
-| **Agent under test**  | The conversational AI Shunya is QA-ing (BUILTIN via Pipecat, ELEVENLABS via ConvAI WS) |
+| **Agent under test**  | The ElevenLabs Conversational AI agent Shunya is QA-ing                          |
 | **Scenario**          | A persona + ordered `steps` + `assertions` + optional `rubric` (YAML → DB)        |
 | **Voice Quirks DSL**  | Inline step annotations (`[stutter]`, `[pause:3s]`, `[hard_input:"…"]`, …)         |
-| **TestRun**           | One execution of a scenario against an agent in a mode (`text`/`audio`/`remote`)   |
+| **TestRun**           | One execution of a scenario against an agent (`text` or `remote` mode)             |
 | **TestResult**        | The transcript + verdict produced by a TestRun                                    |
-| **JudgeScore**        | Per-rubric-field score (0.0–1.0) from the Claude Sonnet judge; pass ≥ 0.7          |
-| **Live Score**        | Per-turn provisional score from ScoringSubAgents during remote runs               |
-| **CallerInterface**   | Abstraction the runner uses; `TextCaller`, `AudioCaller`, or `RemoteAudioCaller`   |
-| **ScenarioCallerBot** | Synthetic caller for BUILTIN audio mode; joins Daily room, speaks steps            |
-| **EvalAgent**         | Plain async orchestrator for ELEVENLABS remote agent testing; connects to ElevenLabs ConvAI WebSocket, drives steps, posts live scores |
+| **JudgeScore**        | Per-rubric-field score (0.0–1.0) promoted from live scores; pass ≥ 0.7             |
+| **Live Score**        | Per-turn score from `Scorer` during a remote run; merged by field key in Django    |
+| **CallerInterface**   | Abstraction the runner uses; `TextCaller` or `RemoteAudioCaller`                   |
+| **EvalAgent**         | Plain async orchestrator for ELEVENLABS remote agent testing; connects to ElevenLabs ConvAI WebSocket, drives scenario steps, posts live scores |
 | **EvalBridge**        | Joins the Daily room as a listener so observers can hear the EvalAgent call live; at most one active per caller process |
 | **Scorer**            | Plain async class that scores all rubric fields concurrently (asyncio.gather) via Claude Sonnet; posts one atomic batch to Django per agent turn |
 
@@ -408,26 +331,21 @@ zenerate/web-py/
 
 | Use                         | Model                          | Where                       |
 |-----------------------------|--------------------------------|-----------------------------|
-| Agent brain (under test)    | `claude-haiku-4-5-20251001`    | `voice_qa/services/chat.py`, pipeline |
+| Agent brain (text mode)     | `claude-haiku-4-5-20251001`    | `voice_qa/services/chat.py` |
 | Live scorer (remote mode)   | `claude-sonnet-4-6`            | `services/voice/eval_agent.py` (`Scorer`) |
-| LLM judge (text/audio mode) | `claude-sonnet-4-6`            | `voice_qa/services/judge.py` (text/audio only; remote uses live scores) |
-| STT (audio mode)            | ElevenLabs **Scribe v2**       | `services/voice/pipeline.py`, `caller_bot.py` |
-| TTS (audio mode + caller)   | ElevenLabs                     | `services/voice/pipeline.py`, `caller_bot.py`, `eval_agent.py` (`audio_utils.synthesize_tts`) |
+| Caller TTS (remote mode)    | ElevenLabs TTS                 | `services/voice/audio_utils.py` (`synthesize_tts`) |
 
 ---
 
 ## 8. Gotchas Worth Repeating
 
-- **Celery worker does not auto-reload.** After editing `runner.py`, `judge.py`, or any task:
-  `docker compose restart celery_worker`. (Django, pipecat, caller all run `--reload`.)
+- **Celery worker does not auto-reload.** After editing `runner.py` or any task:
+  `docker compose restart celery_worker`. (Django and caller both run `--reload`.)
 - **Always pass `tenant_id` to tasks** — omitting it ⇒ RLS filters everything out (empty results).
-- **Two voice processes are intentional** — one `CallClient` per process limit.
 - **Only one EvalBridge (Daily relay) can be active per caller process at a time.** If two remote runs start concurrently, the second one runs WS-only (no live listen-in). This is enforced by `_daily_bridge_in_use` in `eval_agent.py`. Attempting two active `CallClient` instances in the same process would cause the first room's audio to go silent and the second run's audio to bleed into it.
-- **ElevenLabs TTS `output_format` is a query param**, not a body field (else MP3 → VAD noise).
-- **Empty `voice_id` ⇒ opaque 403** — always `voice_id or DEFAULT`.
-- **5 concurrent pipeline limit** on pipecat `/connect`, **4 concurrent remote runs** on caller.
-- **WAV recording uses a virtual write cursor for agent audio.** ElevenLabs streams audio chunks faster than real-time (network bursts). Using arrival timestamps as WAV offsets would collapse all chunks into the same moment. The `_agent_write_cursor` in `EvalAgent` is anchored to wall-clock on each turn's first chunk, then advanced by audio duration (`len(pcm) / BYTES_PER_SEC`) per chunk. Caller frames come from `write_frames` (Daily SDK clocks them in real-time) and need no such correction.
-- **Silence keepalive strategy (ElevenLabs ConvAI):** The keepalive runs only during two inter-speech windows — (a) scoring API call (1–3s after agent finishes), (b) TTS synthesis for next caller turn (0.5–2s). It does NOT run while the agent is responding, because sending user audio chunks during the agent's response causes ElevenLabs to record both on simultaneous tracks, creating overlap in their transcript player. The trade-off: their "Audio duration mismatch" warning may still appear (unavoidable gap during agent response), but the transcript player shows correct turn-taking.
+- **4 concurrent remote runs** max on the caller service (ElevenLabs ConvAI WebSocket limit).
+- **WAV recording uses a virtual write cursor for agent audio.** ElevenLabs streams audio chunks faster than real-time (network bursts). Using arrival timestamps as WAV offsets would collapse all chunks into the same moment. The `_agent_write_cursor` in `EvalAgent` is anchored to wall-clock on each turn's first chunk, then advanced by audio duration (`len(pcm) / BYTES_PER_SEC`) per chunk.
+- **Silence keepalive strategy (ElevenLabs ConvAI):** The keepalive runs only during two inter-speech windows — (a) scoring API call (1–3s after agent finishes), (b) TTS synthesis for next caller turn (0.5–2s). It does NOT run while the agent is responding, because sending user audio chunks during the agent's response causes ElevenLabs to record both on simultaneous tracks, creating overlap in their transcript player.
 - **Live scores use merge-by-field semantics.** `LiveScoresView` merges incoming score batches by field key (not appending), so concurrent per-field POSTs don't race-overwrite each other. The final `_promote_live_scores()` call in `runner.py` refreshes from DB before writing `JudgeScore` rows to pick up the last batch.
 - **Scenario lookup accepts UUID or name.** `TestRunViewSet.create()` tries UUID parse first, falls back to name — because the web UI sends UUIDs, while CLI tests send names.
-- See `TECH_SPEC.md` for the full audio-mode engineering notes (VAD ordering, thread affinity).
+- See `TECH_SPEC.md` for the full audio-mode engineering notes (keepalive timing, WAV cursor, EvalBridge concurrency).

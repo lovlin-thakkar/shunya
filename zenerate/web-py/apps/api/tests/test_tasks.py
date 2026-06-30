@@ -64,24 +64,6 @@ def test_run_scenario_task_retries_on_unexpected_error(tenant_a):
     assert mock_retry.called
 
 
-# --------------------------------------------------------------------------- run_judge_task
-
-def test_run_judge_task_dispatches(tenant_a):
-    from zenlib_agentos.zenlib.reusable_apps.voice_qa.tasks import run_judge_task
-    with patch(f"{TASKS}.services.judge.evaluate_result") as mock_eval:
-        result = run_judge_task.apply(args=["res-1", {"safety": 1.0}, tenant_a.id])
-    assert result.successful()
-    mock_eval.assert_called_once_with("res-1", {"safety": 1.0})
-
-
-def test_run_judge_task_retries_on_error(tenant_a):
-    from zenlib_agentos.zenlib.reusable_apps.voice_qa.tasks import run_judge_task
-    with patch(f"{TASKS}.services.judge.evaluate_result", side_effect=RuntimeError("llm down")), \
-         patch.object(run_judge_task, "retry", side_effect=Retry()) as mock_retry:
-        run_judge_task.apply(args=["res-1", {}, tenant_a.id])
-    assert mock_retry.called
-
-
 # --------------------------------------------------------------------------- compute_call_metrics
 
 def test_compute_call_metrics_dispatches(tenant_a):
