@@ -2,6 +2,7 @@
 Caller service: drives remote ElevenLabs Conversational AI agents.
 Runs in a separate process with its own Daily SDK context.
 """
+import hmac
 import logging
 import os
 import uuid
@@ -39,7 +40,7 @@ _active_remote = 0
 def _require_service_token(x_service_token: str = Header(default="")) -> None:
     if not _SERVICE_TOKEN:
         raise HTTPException(status_code=500, detail="Service token not configured")
-    if x_service_token != _SERVICE_TOKEN:
+    if not hmac.compare_digest(x_service_token, _SERVICE_TOKEN):
         raise HTTPException(status_code=401, detail="Invalid service token")
 
 
@@ -95,6 +96,7 @@ async def remote_connect():
 class RemoteRunRequest(BaseModel):
     el_agent_id: str
     steps: list[dict]
+    persona: str = ""         # caller persona — passed to the live Scorer for context
     agent_api_key: str = ""   # tenant's ElevenLabs key — reaches/signs their agent
     dynamic_variables: dict = {}  # injected into conversation_initiation_client_data
     voice_id: str = CALLER_DEFAULT_VOICE_ID
@@ -124,6 +126,7 @@ async def remote_run(req: RemoteRunRequest):
         result = await run_eval_agent(
             el_agent_id=req.el_agent_id,
             steps=req.steps,
+            persona=req.persona,
             room_url=req.room_url or "",
             room_token=req.room_token or "",
             agent_api_key=req.agent_api_key,

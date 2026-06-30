@@ -211,6 +211,7 @@ class EvalAgent:
         self,
         el_agent_id: str,
         steps: list[dict],
+        persona: str = "",
         room_url: str = "",
         room_token: str = "",
         agent_api_key: str = "",
@@ -226,6 +227,7 @@ class EvalAgent:
     ):
         self.el_agent_id = el_agent_id
         self.steps = steps
+        self._persona = persona or ""
         self.room_url = room_url
         self.room_token = room_token
         self._agent_key = agent_api_key
@@ -277,9 +279,18 @@ class EvalAgent:
                 if self._rubric
                 else ["instruction_following", "goal_completion", "csat_tone", "safety"]
             )
-            persona = self.steps[0].get("persona", "") if self.steps else ""
             anthro_key = os.environ.get("ANTHROPIC_API_KEY", "")
-            self._scorer = Scorer(anthro_key, persona=persona)
+            if not anthro_key:
+                # Without a key the Scorer is a no-op and NO live scores are posted,
+                # so the run would silently land with zero judge scores. Make the
+                # degradation loud — the run still completes (post-call judge in the
+                # Django worker can backfill scores from the transcript).
+                logger.warning(
+                    "ANTHROPIC_API_KEY not set on the caller service — live scoring is "
+                    "DISABLED for run %s. No during-call scores will be posted.",
+                    self._run_id or "?",
+                )
+            self._scorer = Scorer(anthro_key, persona=self._persona)
 
             if self.room_url and self.room_token:
                 if _daily_bridge_in_use:
@@ -667,6 +678,7 @@ class EvalAgent:
 async def run_eval_agent(
     el_agent_id: str,
     steps: list[dict],
+    persona: str = "",
     room_url: str = "",
     room_token: str = "",
     agent_api_key: str = "",
@@ -683,6 +695,7 @@ async def run_eval_agent(
     agent = EvalAgent(
         el_agent_id=el_agent_id,
         steps=steps,
+        persona=persona,
         room_url=room_url,
         room_token=room_token,
         agent_api_key=agent_api_key,

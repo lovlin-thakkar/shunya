@@ -18,5 +18,4 @@ class TenantFactory(DjangoModelFactory):
 
     name = factory.Sequence(lambda n: f"Tenant {n}")
     slug = factory.Sequence(lambda n: f"tenant-{n}")
-    service_token = factory.Sequence(lambda n: f"svc-token-{n}")
     is_active = True

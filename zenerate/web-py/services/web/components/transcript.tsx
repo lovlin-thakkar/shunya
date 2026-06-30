@@ -1,12 +1,13 @@
 import type { TranscriptTurn } from "@/lib/types";
 
+import { RecordingPlayer } from "./recording-player";
+
 interface Props {
   turns: TranscriptTurn[];
   audioRunId?: string;
-  apiUrl?: string;
 }
 
-export function Transcript({ turns, audioRunId, apiUrl }: Props) {
+export function Transcript({ turns, audioRunId }: Props) {
   if (!turns || turns.length === 0) {
     return (
       <div className="py-10 text-center text-sm" style={{ color: "var(--ink-3)" }}>
@@ -21,23 +22,7 @@ export function Transcript({ turns, audioRunId, apiUrl }: Props) {
       {audioRunId && (
         <div className="mb-5 pb-5" style={{ borderBottom: "1px solid var(--border)" }}>
           <p className="text-xs font-medium mb-2" style={{ color: "var(--ink-3)" }}>Recording</p>
-          <audio
-            controls
-            className="w-full h-8"
-            style={{ accentColor: "var(--blue)" }}
-            src={`${apiUrl ?? "http://localhost:8000"}/recordings/${audioRunId}.wav`}
-          />
-          <p className="text-xs mt-2" style={{ color: "var(--ink-3)" }}>
-            <a
-              href={`${apiUrl ?? "http://localhost:8000"}/recordings/${audioRunId}.wav`}
-              download
-              className="underline underline-offset-2"
-              style={{ color: "var(--blue)" }}
-            >
-              {audioRunId}.wav
-            </a>
-            {" "}— saved to <code className="font-mono" style={{ fontSize: "10px" }}>/recordings/{audioRunId}.wav</code>
-          </p>
+          <RecordingPlayer runId={audioRunId} />
         </div>
       )}
 

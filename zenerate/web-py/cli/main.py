@@ -491,7 +491,7 @@ def tests_audio(
 
     console.print("[dim]Downloading recording…[/dim]")
     try:
-        data = client.get_bytes(f"/recordings/{run_id}.wav")
+        data = client.get_bytes(f"/api/v1/test-runs/{run_id}/recording/")
     except client.ShunyaError as e:
         rprint(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)

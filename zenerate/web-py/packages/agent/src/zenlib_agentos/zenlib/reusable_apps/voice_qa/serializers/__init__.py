@@ -15,7 +15,14 @@ class AgentSerializer(serializers.ModelSerializer):
         fields = ["id", "name", "description", "system_prompt", "greeting",
                   "voice_id", "target_type", "el_agent_id", "dynamic_variables",
                   "yaml_content", "status", "created_at", "updated_at"]
-        read_only_fields = ["id", "yaml_content", "created_at", "updated_at"]
+        # Sync-managed fields are read-only: ElevenLabs agents are synced, not
+        # authored here, and sync-elevenlabs would overwrite client edits to
+        # name/system_prompt/target_type/el_agent_id/status anyway. Clients may
+        # still PATCH the user-owned fields (description, greeting, voice_id,
+        # dynamic_variables) — e.g. the UI editing dynamic_variables.
+        read_only_fields = ["id", "name", "system_prompt", "target_type",
+                            "el_agent_id", "status", "yaml_content",
+                            "created_at", "updated_at"]
 
 
 class CallSerializer(serializers.ModelSerializer):

@@ -122,6 +122,9 @@ class ElevenLabsCredential(UUIDTenantModel):
     encryption is a follow-up (would require adding the `cryptography` dep).
     """
 
+    # TODO(security): api_key is stored in PLAINTEXT. Anyone with DB or backup
+    # access can read every tenant's ElevenLabs key. Encrypt at rest (Fernet via
+    # `cryptography`, or a KMS-backed field) before production.
     api_key = models.TextField()
     key_hint = models.CharField(max_length=16, blank=True, default="")  # e.g. "sk_0…a1b2"
 

@@ -48,6 +48,15 @@ class AgentViewSet(viewsets.ModelViewSet):
             status=status.HTTP_405_METHOD_NOT_ALLOWED,
         )
 
+    def destroy(self, request, *args, **kwargs):
+        # Agents are synced from ElevenLabs; they are deactivated by sync-elevenlabs
+        # when they disappear upstream, not deleted ad hoc through the API.
+        return Response(
+            {"error": "Agents cannot be deleted here. They are deactivated "
+                      "automatically when removed from your ElevenLabs account."},
+            status=status.HTTP_405_METHOD_NOT_ALLOWED,
+        )
+
     @action(detail=False, methods=["post"], url_path="sync-elevenlabs")
     def sync_elevenlabs(self, request):
         """List the tenant's ElevenLabs Conversational AI agents (using their saved
@@ -267,6 +276,27 @@ class TestRunViewSet(viewsets.ModelViewSet):
         except TestResult.DoesNotExist:
             return Response({"error": "No results yet"}, status=404)
 
+    @action(detail=True, methods=["get"], url_path="recording")
+    def recording(self, request, pk=None):
+        """Stream the WAV recording for this run — authenticated + tenant-scoped.
+
+        The run is fetched via get_queryset(), which filters by the current
+        tenant, so one tenant can never read another's recording. The on-disk
+        filename is derived from the run's UUID PK (never from user input), so
+        there is no path-traversal surface.
+        """
+        import os
+        from django.conf import settings
+        from django.http import FileResponse
+
+        run = self.get_object()
+        path_on_disk = os.path.join(settings.RECORDINGS_DIR, f"{run.id}.wav")
+        if not os.path.isfile(path_on_disk):
+            return Response({"error": "Recording not found"}, status=404)
+        response = FileResponse(open(path_on_disk, "rb"), content_type="audio/wav")
+        response["Content-Disposition"] = f'inline; filename="{run.id}.wav"'
+        return response
+
     @action(detail=False, methods=["delete"], url_path="clear")
     def clear(self, request):
         """Delete all test runs for the current tenant."""
@@ -328,6 +358,10 @@ class ElevenLabsIntegrationView(APIView):
             tenant=_tenant(), defaults={"api_key": api_key, "key_hint": hint},
         )
         return Response({"configured": True, "key_hint": hint})
+
+    def delete(self, request):
+        ElevenLabsCredential.objects.filter(tenant=_tenant()).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     # Allow POST as an alias for PUT so the UI can use either verb.
     post = put

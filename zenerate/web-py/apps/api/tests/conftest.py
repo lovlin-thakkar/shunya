@@ -24,12 +24,12 @@ def _isolate_tenant_context():
 
 @pytest.fixture
 def tenant_a(db) -> Tenant:
-    return Tenant.objects.create(name="Tenant A", slug="tenant-a", service_token="svc-a")
+    return Tenant.objects.create(name="Tenant A", slug="tenant-a")
 
 
 @pytest.fixture
 def tenant_b(db) -> Tenant:
-    return Tenant.objects.create(name="Tenant B", slug="tenant-b", service_token="svc-b")
+    return Tenant.objects.create(name="Tenant B", slug="tenant-b")
 
 
 @pytest.fixture
