@@ -93,6 +93,7 @@ class Scorer:
             'Return JSON: {"<dimension>": {"score": 0.0, "reason": "<=10 words"}, ...}'
         )
         try:
+            # TODO: enforce JSON schema
             resp = await self._client.messages.create(
                 model=LIVE_MODEL,
                 max_tokens=400,
